@@ -53,6 +53,12 @@
 4. При необходимости добавьте дополнительные потоки и повторите для него шаги №№1-3.
 5. Запустите фарминг
 
+## Скриншоты
+<details>
+  <summary>Нажмите, чтобы раскрыть спойлер</summary>
+  ![загруженное](https://raw.githubusercontent.com/Pirozhok40/Dropler-GUI/main/screen.png)
+</details>
+
 ## Лицензия
 
 [MIT License](LICENSE)
