@@ -1,0 +1,145 @@
+<Window x:Class="DroplerGUI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Dropler GUI" Height="600" Width="800">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="10">
+                <!-- Кнопка создания нового потока -->
+                <Button Content="Создать новый поток" Width="150" Height="25" 
+                        HorizontalAlignment="Center" Margin="0,0,0,10"
+                        Click="AddTaskButton_Click"/>
+
+                <!-- Список потоков -->
+                <ItemsControl x:Name="TasksListView">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="Gray" BorderThickness="1" Margin="0,0,0,10">
+                                <StackPanel>
+                                    <Grid Margin="10">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <!-- Заголовок потока -->
+                                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                                            <!-- Индикатор состояния -->
+                                            <Ellipse Width="12" Height="12" 
+                                                    Margin="0,3,5,0"
+                                                    Fill="{Binding StatusColor}"
+                                                    ToolTip="{Binding Status}"/>
+                                            
+                                            <TextBlock Text="{Binding TaskNumber, StringFormat='Task {0}'}" 
+                                                     FontWeight="Bold"/>
+                                        </StackPanel>
+
+                                        <!-- Кнопки управления -->
+                                        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+                                            <Button Content="Start" Width="80" Height="25" Margin="0,0,5,0"
+                                                    Command="{Binding StartCommand}"/>
+                                            <Button Content="Stop" Width="80" Height="25" Margin="0,0,5,0"
+                                                    Command="{Binding StopCommand}"/>
+                                            <Button Content="Показать логи" Width="120" Height="25" Margin="0,0,5,0"
+                                                    Tag="{Binding TaskNumber}"
+                                                    Click="LogsButton_Click"/>
+                                            <Button Content="Настройка конфига" Width="120" Height="25" Margin="0,0,5,0"
+                                                    Click="SettingsButton_Click"
+                                                    IsEnabled="{Binding IsSettingsEnabled}"/>
+                                            <Button Content="Статистика" Width="100" Height="25" Margin="0,0,5,0"
+                                                    Click="StatisticsButton_Click"/>
+                                            <Button Content="Удалить поток" Width="100" Height="25"
+                                                    Command="{Binding DeleteCommand}"
+                                                    Visibility="{Binding ShowDelete}"/>
+                                        </StackPanel>
+
+                                        <!-- Информация о потоке -->
+                                        <Grid Grid.Row="2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+
+                                            <Border Grid.Column="0" BorderBrush="LightGray" BorderThickness="1" 
+                                                    Margin="0,0,10,0" Padding="5">
+                                                <StackPanel>
+                                                    <TextBlock>
+                                                        <Run Text="Всего аккаунтов: "/>
+                                                        <Run Text="{Binding TotalAccounts}"/>
+                                                    </TextBlock>
+                                                    <TextBlock>
+                                                        <Run Text="Аккаунты, разрешенные для фарма: "/>
+                                                        <Run Text="{Binding EnabledAccounts}"/>
+                                                    </TextBlock>
+                                                </StackPanel>
+                                            </Border>
+
+                                            <Border Grid.Column="1" BorderBrush="LightGray" BorderThickness="1" 
+                                                    Margin="0,0,10,0" Padding="5">
+                                                <StackPanel>
+                                                    <TextBlock Text="В процессе фарма:"/>
+                                                    <TextBlock Text="{Binding FarmingAccounts}"/>
+                                                </StackPanel>
+                                            </Border>
+
+                                            <Border Grid.Column="2" BorderBrush="LightGray" BorderThickness="1" 
+                                                    Padding="5">
+                                                <StackPanel>
+                                                    <TextBlock Text="Следующий запуск через:"/>
+                                                    <TextBlock Text="{Binding NextStart}"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                    </Grid>
+
+                                    <!-- Область логов для каждого потока -->
+                                    <Grid x:Name="LogArea" Height="200" Margin="10,0,10,10">
+                                        <Grid.Style>
+                                            <Style TargetType="Grid">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ShowLogs}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Grid.Style>
+                                        <ScrollViewer x:Name="LogScrollViewer" 
+                                                      VerticalScrollBarVisibility="Auto"
+                                                      Background="Black"
+                                                      ScrollChanged="ScrollViewer_ScrollChanged">
+                                            <ItemsControl x:Name="LogItemsControl" ItemsSource="{Binding Logs}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <TextBlock Text="{Binding Text}" 
+                                                                 Foreground="{Binding Color}"
+                                                                 FontFamily="Consolas"
+                                                                 TextWrapping="NoWrap"/>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </ScrollViewer>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Статус бар -->
+        <StatusBar Grid.Row="1">
+            <StatusBarItem>
+                <TextBlock Text="Dropler GUI created with love by araan515 (dropler ver. 1.1, steamkit2 ver. 3.0.0-beta4)"/>
+            </StatusBarItem>
+        </StatusBar>
+    </Grid>
+</Window> 

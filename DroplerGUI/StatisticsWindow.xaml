@@ -1,0 +1,67 @@
+<Window x:Class="DroplerGUI.StatisticsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Статистика" Height="450" Width="1000"
+        WindowStartupLocation="Manual">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Text="Поток: " VerticalAlignment="Center"/>
+            <ComboBox x:Name="TaskComboBox" Width="50" Margin="5,0" SelectionChanged="TaskComboBox_SelectionChanged"/>
+            <TextBlock Text="Обновление каждые: " VerticalAlignment="Center" Margin="20,0,0,0"/>
+            <TextBox x:Name="UpdateIntervalTextBox" Width="50" Text="5" Margin="5,0"/>
+            <TextBlock Text="секунд" VerticalAlignment="Center"/>
+            <Button Content="Обновить сейчас" Margin="20,0,0,0" Click="RefreshButton_Click"/>
+            <Button Content="Экспорт" Margin="20,0,0,0" Click="ExportButton_Click"/>
+        </StackPanel>
+
+        <DataGrid Grid.Row="1" x:Name="StatisticsGrid" 
+                  AutoGenerateColumns="False" 
+                  IsReadOnly="True"
+                  CanUserSortColumns="True"
+                  CanUserResizeColumns="True"
+                  GridLinesVisibility="All">
+            <DataGrid.Resources>
+                <Style TargetType="DataGridRow">
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsActive}" Value="Online">
+                            <Setter Property="Background" Value="#E6FFE6"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </DataGrid.Resources>
+            <DataGrid.RowDetailsTemplate>
+                <DataTemplate>
+                    <StackPanel Margin="20,5">
+                        <TextBlock Text="Статистика по играм:" FontWeight="Bold" Margin="0,0,0,5"/>
+                        <ItemsControl ItemsSource="{Binding GameDrops}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Margin="0,2">
+                                        <Run Text="Игра "/>
+                                        <Run Text="{Binding GameId}"/>
+                                        <Run Text=": всего дропов - "/>
+                                        <Run Text="{Binding TotalDrops}"/>
+                                    </TextBlock>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </DataTemplate>
+            </DataGrid.RowDetailsTemplate>
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Аккаунт" Binding="{Binding AccountName}" Width="120"/>
+                <DataGridTextColumn Header="Статус" Binding="{Binding IsActive}" Width="80"/>
+                <DataGridTextColumn Header="Всего дропов" Binding="{Binding TotalDropsCount}" Width="100"/>
+                <DataGridTextColumn Header="Игр с дропами" Binding="{Binding GameDrops.Count}" Width="100"/>
+                <DataGridTextColumn Header="Последний дроп" Binding="{Binding LastDropTime, StringFormat={}{0:dd.MM.yyyy HH:mm:ss}}" Width="150"/>
+                <DataGridTextColumn Header="Последнее подключение" Binding="{Binding LastConnectionTime, StringFormat={}{0:dd.MM.yyyy HH:mm:ss}}" Width="150"/>
+                <DataGridTextColumn Header="Время в сети" Binding="{Binding OnlineTime}" Width="*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</Window> 
