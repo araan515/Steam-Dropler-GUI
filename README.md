@@ -48,7 +48,7 @@
 ## Использование
 
 1. Добавьте аккаунты в файл log_pass.txt
-2. Поместите .maFile файлы в папку maFiles (maFile должны иметь название steam_login.mafile, например, pupsik2000.mafile). Если есть необходимость в автоматическом массовом переименовании maFile - используйте скрипт - [maFile_renamer](https://github.com/Pirozhok40/maFile_renamer)
+2. Поместите .maFile файлы в папку maFiles (maFile должны иметь название {account_name}.mafile, например, pupsik2000.mafile). Если есть необходимость в автоматическом массовом переименовании maFile - используйте скрипт - [maFile_renamer](https://github.com/Pirozhok40/maFile_renamer)
 3. Настройте конфигурацию
 4. При необходимости добавьте дополнительные потоки и повторите для него шаги №№1-3.
 5. Запустите фарминг
