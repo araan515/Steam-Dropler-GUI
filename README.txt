@@ -15,5 +15,5 @@ Dropler GUI by araan515
 
 
 Поддержка:
-- Исходный код: https://github.com/araan515/dropler-gui
-- Обсуждения и проблемы: https://github.com/araan515/dropler-gui/issues 
+- Исходный код: https://github.com/Pirozhok40/Dropler-GUI/
+- Обсуждения и проблемы: https://github.com/Pirozhok40/Dropler-GUI/issues 
