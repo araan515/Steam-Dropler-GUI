@@ -56,7 +56,7 @@
 ## Скриншоты
 <details>
   <summary>Нажмите, чтобы раскрыть спойлер</summary>
-  ![загруженное](https://raw.githubusercontent.com/Pirozhok40/Dropler-GUI/main/screen.png)
+https://raw.githubusercontent.com/Pirozhok40/Dropler-GUI/main/screen.png
 </details>
 
 ## Лицензия
