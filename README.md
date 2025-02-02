@@ -10,7 +10,7 @@
 ## Версии
 
 Проект доступен в двух версиях:
-1. [Исходный код](https://github.com/Pirozhok40/Dropler-GUI - для разработчиков
+1. [Исходный код](https://github.com/Pirozhok40/Dropler-GUI) - для разработчиков
 2. [Скомпилированная версия](https://github.com/Pirozhok40/Dropler-GUI/releases) - для пользователей
 
 ## Требования
