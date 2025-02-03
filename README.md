@@ -1,7 +1,7 @@
-# Donate
-Если Вам понравилась моя разработка - буду благодарен, если рассмотрите возможность доната!
+# Donate  
+Если Вам понравилась моя разработка — буду благодарен, если рассмотрите возможность доната!  
 
-![загруженное](https://github.com/user-attachments/assets/23ae27ed-3168-438a-9a4a-3c85b3c31a78)
+[![загруженное](https://github.com/user-attachments/assets/23ae27ed-3168-438a-9a4a-3c85b3c31a78)](https://donate.stream/donate_679f7474ae4f8)
 
 # Dropler GUI by araan515
 
