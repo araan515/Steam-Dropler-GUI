@@ -92,7 +92,7 @@
                                             <Border Grid.Column="2" BorderBrush="LightGray" BorderThickness="1" 
                                                     Padding="5">
                                                 <StackPanel>
-                                                    <TextBlock Text="Следующий запуск через:"/>
+                                                    <TextBlock Text="Следующий аккаунт запустится через:"/>
                                                     <TextBlock Text="{Binding NextStart}"/>
                                                 </StackPanel>
                                             </Border>
@@ -138,7 +138,7 @@
         <!-- Статус бар -->
         <StatusBar Grid.Row="1">
             <StatusBarItem>
-                <TextBlock Text="Dropler GUI created with love by araan515 (dropler ver. 1.1, steamkit2 ver. 3.0.0-beta4)"/>
+                <TextBlock x:Name="VersionInfoTextBlock"/>
             </StatusBarItem>
         </StatusBar>
     </Grid>

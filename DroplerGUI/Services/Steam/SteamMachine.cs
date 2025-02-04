@@ -65,9 +65,27 @@ namespace DroplerGUI.Services.Steam
 
         private void Log(string message, bool showInConsole = true)
         {
-            if (showInConsole)
+            try
             {
-                _logCallback?.Invoke(message);
+                var logFile = Path.Combine(Constants.GetTaskLogsPath(_taskNumber), $"{DateTime.Now:yyyy-MM-dd}.log");
+                var formattedMessage = $"[{DateTime.Now:HH:mm:ss}] [Task {_taskNumber}] {message}";
+                
+                // Записываем в файл
+                File.AppendAllText(logFile, formattedMessage + Environment.NewLine);
+                
+                // Отправляем в UI через callback
+                if (showInConsole)
+                {
+                    _logCallback?.Invoke(message);
+                }
+            }
+            catch
+            {
+                // Если не удалось записать в файл, хотя бы пытаемся показать в UI
+                if (showInConsole)
+                {
+                    _logCallback?.Invoke(message);
+                }
             }
         }
 
@@ -103,9 +121,9 @@ namespace DroplerGUI.Services.Steam
                 }
 
                 // Выполняем вход
-                Log($"Тип аутентификации: {_account.AuthType}", false);
-                var authenticator = AuthenticatorFactory.CreateAuthenticator((int)_account.AuthType, _account.SharedSecret);
-                
+                Log($"Начинаю процесс входа для аккаунта {_account.Name}", false);
+                Log($"SharedSecret: {(!string.IsNullOrEmpty(_account.SharedSecret))}", false);
+                var authenticator = AuthenticatorFactory.CreateAuthenticator(_account.SharedSecret);
                 var twoFactorCode = await authenticator.GetDeviceCodeAsync(false);
                 Log($"Получен код аутентификации: {(string.IsNullOrEmpty(twoFactorCode) ? "нет" : "да")}", false);
                 
@@ -388,7 +406,7 @@ namespace DroplerGUI.Services.Steam
                 string errorMessage = callback.Result switch
                 {
                     EResult.AccountLoginDeniedNeedTwoFactor => 
-                        $"Требуется двухфакторная аутентификация. Текущий тип auth: {_account.AuthType}, SharedSecret: {(!string.IsNullOrEmpty(_account.SharedSecret))}",
+                        $"Требуется двухфакторная аутентификация. SharedSecret: {(!string.IsNullOrEmpty(_account.SharedSecret))}",
                     EResult.InvalidPassword => 
                         "Неверный пароль",
                     EResult.TwoFactorCodeMismatch => 

@@ -1,8 +1,3 @@
-# Donate  
-Если Вам понравилась моя разработка — буду благодарен, если рассмотрите возможность доната!  
-
-[![загруженное](https://github.com/user-attachments/assets/23ae27ed-3168-438a-9a4a-3c85b3c31a78)](https://donate.stream/donate_679f7474ae4f8)
-
 # Dropler GUI by araan515
 
 Графический интерфейс для автоматизации фарминга дропов в Steam.
@@ -10,8 +5,8 @@
 ## Версии
 
 Проект доступен в двух версиях:
-1. [Исходный код](https://github.com/Pirozhok40/Dropler-GUI) - для разработчиков
-2. [Скомпилированная версия](https://github.com/Pirozhok40/Dropler-GUI/releases) - для пользователей
+1. [Исходный код](https://github.com/araan515/Dropler-GUI) - для разработчиков
+2. [Скомпилированная версия](https://github.com/araan515/Dropler-GUI/releases) - для пользователей
 
 ## Требования
 
@@ -22,7 +17,7 @@
 ## Установка
 
 ### Для пользователей
-1. Скачайте последнюю версию из раздела [Releases](https://github.com/Pirozhok40/Dropler-GUI/releases)
+1. Скачайте последнюю версию из раздела [Releases](https://github.com/araan515/Dropler-GUI/releases)
 2. Распакуйте архив
 3. Переименуйте DroplerGUI.bin в DroplerGUI.exe
 4. Запустите DroplerGUI.exe
@@ -48,10 +43,13 @@
 ## Использование
 
 1. Добавьте аккаунты в файл log_pass.txt в формате login:password (каждый новый аккаунт на новой строке)
-2. Поместите .maFile файлы в папку maFiles (maFile должны иметь название {account_name}.mafile, например, pupsik2000.mafile). Если есть необходимость в автоматическом массовом переименовании maFile - используйте скрипт - [maFile_renamer](https://github.com/Pirozhok40/maFile_renamer)
+2. Поместите .maFile файлы в папку maFiles
 3. Настройте конфигурацию
 4. При необходимости добавьте дополнительные потоки и повторите для него шаги №№1-3.
 5. Запустите фарминг
+
+UPD. файлы maFiles нужны только для создания новых файлов аккаунтов. Если у Вас уже имеются созданные файлы {account_name}.json проверьте, чтоб в них имелись заполненные обязательные флаги "alias", "password" и "SharedSecret". 
+Если такие файлы имеются просто поместите их в папку Accounts и запустите фарм.
 
 ## Скриншоты
 <details>

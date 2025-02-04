@@ -32,11 +32,6 @@ namespace DroplerGUI.Models
         public string Password { get; set; }
 
         /// <summary>
-        /// Steam id
-        /// </summary>
-        public ulong? SteamId { get; set; }
-
-        /// <summary>
         /// Участвует в фарме
         /// </summary>
         [JsonProperty("enabled")]
@@ -85,44 +80,24 @@ namespace DroplerGUI.Models
         public string TaskID { get; set; }
 
         /// <summary>
-        /// Мобильный аутентификатор
-        /// </summary>
-        [JsonIgnore]
-        public MobileAuth MobileAuth { get; set; }
-
-        /// <summary>
         /// Путь до файла настроек
         /// </summary>
         private string FilePath { get; set; }
 
         /// <summary>
-        /// Время последнего обновления ключа для авторизации
-        /// </summary>
-        public uint Ltime { get; set; }
-
-        /// <summary>
-        /// Упрощенный вход sda
+        /// Упрощенный вход Steam Guard
         /// </summary>
         public string SharedSecret { get; set; }
 
         /// <summary>
-        /// Правила дропа
-        /// </summary>
-
-        [JsonIgnore]
-        //public List<uint> AppIds => DropConfig?.Select(t=>t.Item1).ToList();
-
-        /// <summary>
-        /// Время дропа
+        /// Настройки времени
         /// </summary>
         public TimeConfig TimeConfig { get; set; }
 
-        public string AccessToken { get; set; }
-        
         /// <summary>
-        /// Способ авторизации
+        /// Время последнего обновления ключа для авторизации
         /// </summary>
-        public AuthType AuthType { get; set; } = (AuthType)2;
+        public uint Ltime { get; set; }
 
         /// <summary>
         /// Переменная loggeding
@@ -164,7 +139,6 @@ namespace DroplerGUI.Models
             ShowStatus = "Online";
             Enabled = true;
             IsRunning = false;
-            AuthType = (AuthType)2;
         }
 
         /// <summary>
@@ -174,9 +148,7 @@ namespace DroplerGUI.Models
         public AccountConfig(string path)
         {
             var obj = JsonConvert.DeserializeObject<AccountConfig>(File.ReadAllText(path));
-            AuthType = obj.AuthType;
             Password = obj.Password;
-            SteamId = obj.SteamId;
             Enabled = obj.Enabled;
             Action = "none";
             ShowStatus = obj.ShowStatus;
@@ -191,13 +163,8 @@ namespace DroplerGUI.Models
             IdleNow = obj.IdleNow;
             LastStartTime = obj.LastStartTime;
             SharedSecret = obj.SharedSecret;
-            if (SharedSecret != null)
-            {
-                MobileAuth = new MobileAuth {SharedSecret = obj.SharedSecret};
-            }
             Name = Path.GetFileNameWithoutExtension(path);
             Alias = obj.Alias ?? Name;
-            AccessToken = obj.AccessToken;
             Ltime = obj.Ltime != 0 ? obj.Ltime : 1;
 
             int naml = Alias.Length;

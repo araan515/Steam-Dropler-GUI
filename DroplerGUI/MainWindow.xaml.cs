@@ -26,6 +26,9 @@ namespace DroplerGUI
             
             try
             {
+                // Устанавливаем информацию о версии
+                VersionInfoTextBlock.Text = Constants.GetVersionInfo();
+
                 // Подписываемся на событие закрытия окна
                 this.Closing += MainWindow_Closing;
 

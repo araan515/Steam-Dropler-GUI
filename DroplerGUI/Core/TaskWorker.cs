@@ -11,6 +11,7 @@ using DroplerGUI.Models;
 using DroplerGUI.Services;
 using DroplerGUI.Services.Steam;
 using SteamKit2;
+using System.Collections.Concurrent;
 
 namespace DroplerGUI.Core
 {
@@ -54,18 +55,29 @@ namespace DroplerGUI.Core
 
         // Коллекции
         private HashSet<AccountConfig> _accounts;
-        private Dictionary<string, MobileAuth> _mobileAuths;
         
         private static List<TaskInstance> TaskInstances = new List<TaskInstance>();
+
+        // Добавляем объект для синхронизации
+        private readonly object _accountsLock = new object();
+
+        // Коллекции для управления аккаунтами
+        private readonly ConcurrentDictionary<string, AccountConfig> _allAccounts;
+        private readonly ConcurrentQueue<AccountConfig> _accountQueue;
+        private readonly ConcurrentDictionary<string, AccountConfig> _activeAccounts;
+        
+        // Обновляем свойство для доступа к аккаунтам
+        public IEnumerable<AccountConfig> Accounts => _allAccounts.Values;
+        public MainConfig Config => _config;
+        public int ActiveAccountsCount => _activeAccounts.Count;
 
         public void SetTaskInstance(TaskInstance taskInstance)
         {
             _taskInstance = taskInstance;
-            // Добавляем экземпляр в статический список если его там еще нет
-            if (!TaskInstances.Contains(taskInstance))
-            {
-                TaskInstances.Add(taskInstance);
-            }
+            // Удаляем старый экземпляр, если он существует
+            TaskInstances.RemoveAll(t => t.TaskNumber == taskInstance.TaskNumber);
+            // Добавляем новый экземпляр
+            TaskInstances.Add(taskInstance);
         }
 
         public Action<string> LogCallback
@@ -99,7 +111,7 @@ namespace DroplerGUI.Core
 
                 foreach (var task in TaskInstances)
                 {
-                    if (task.Worker._accounts.Contains(account))
+                    if (task.Worker._allAccounts.ContainsKey(account.Name.ToLower()))
                     {
                         task.StatisticsService.AddDrop(account.Name, appId, itemDefId);
                         task.Worker.Log($"[SUCCESS] [{account.Alias}] Получен дроп для игры {appId} (itemdefid: {itemDefId})");
@@ -111,7 +123,7 @@ namespace DroplerGUI.Core
                 {
                     File.AppendAllText(dropFile, "[ERROR] TaskInstances список пуст!" + Environment.NewLine);
                 }
-                else if (!TaskInstances.Any(t => t.Worker._accounts.Contains(account)))
+                else if (!TaskInstances.Any(t => t.Worker._allAccounts.ContainsKey(account.Name.ToLower())))
                 {
                     File.AppendAllText(dropFile, $"[ERROR] Аккаунт {account.Name} не найден ни в одном из тасков!" + Environment.NewLine);
                 }
@@ -132,21 +144,13 @@ namespace DroplerGUI.Core
             _logger = new TaskLoggingService(_taskPath, taskId);
             _config = MainConfig.GetConfig(taskId);
             
-            _accounts = new HashSet<AccountConfig>();
-            _mobileAuths = new Dictionary<string, MobileAuth>();
+            // Инициализируем коллекции
+            _accounts = new HashSet<AccountConfig>(new AccountConfigComparer());
+            _allAccounts = new ConcurrentDictionary<string, AccountConfig>(StringComparer.OrdinalIgnoreCase);
+            _accountQueue = new ConcurrentQueue<AccountConfig>();
+            _activeAccounts = new ConcurrentDictionary<string, AccountConfig>(StringComparer.OrdinalIgnoreCase);
             
             Initialize();
-            
-            // Добавляем экземпляр в статический список
-            var existingTask = TaskInstances.FirstOrDefault(t => t.TaskNumber == taskId);
-            if (existingTask == null)
-            {
-                var taskInstance = TaskInstances.FirstOrDefault(t => t.Worker == this);
-                if (taskInstance != null)
-                {
-                    TaskInstances.Add(taskInstance);
-                }
-            }
         }
 
         private void Initialize()
@@ -165,16 +169,13 @@ namespace DroplerGUI.Core
             _config = MainConfig.GetConfig(_taskId);
 
             // Сбрасываем флаги для всех аккаунтов при старте
-            if (_accounts != null)
+            foreach (var account in _allAccounts.Values)
             {
-                foreach (var account in _accounts)
-                {
-                    account.IdleNow = false;
-                    account.IsRunning = false;
-                    account.Action = "none";
-                    account.TaskID = null;
-                    account.Save();
-                }
+                account.IdleNow = false;
+                account.IsRunning = false;
+                account.Action = "none";
+                account.TaskID = null;
+                account.Save();
             }
 
             // Проверяем и корректируем StartTimeOut
@@ -205,15 +206,15 @@ namespace DroplerGUI.Core
 
         private void LogStartupInfo()
         {
-            string version = GetVersion();
-            Log($"Steam-dropler ver. ({version})");
+            // Выводим информацию о версии
+            Log(Constants.GetDroplerVersionInfo());
             Log("Модифицировано с любовью araan515 (за основу взята версия koperniki)");
             Log($"Аккаунты запускаются с переодичностью {_config.StartTimeOut} секунд");
             Log($"Аккаунты будут фармить на протяжении {_config.TimeConfig.IdleTime} минут после успешного подключения");
             Log($"Интервал проверки дропа: {_config.ChkIdleTimeOut} минут");
             Log($"Максимальное количество параллельных задач: {_config.ParallelCount}");
-            Log($"Общее количество аккаунтов {_accounts.Count}");
-            Log($"Общее количество аккаунтов, которые будут фармиться {_accounts.Count(t => t.Enabled)}");
+            Log($"Общее количество аккаунтов {_allAccounts.Count}");
+            Log($"Общее количество аккаунтов, которые будут фармиться {_allAccounts.Values.Count(t => t.Enabled)}");
         }
 
         private string GetVersion()
@@ -223,27 +224,31 @@ namespace DroplerGUI.Core
 
         private void StartFirstAccount()
         {
-            var accountToStart = _accounts
-                .Where(t => t.Enabled && 
-                          t.MobileAuth?.SharedSecret != null &&
-                          (!t.LastStartTime.HasValue ||
-                           (DateTime.Now - t.LastStartTime.Value).TotalMinutes >= _config.TimeConfig.PauseBeatwinIdleTime))
-                .OrderBy(t => t.LastStartTime ?? DateTime.MinValue)
-                .FirstOrDefault();
+            RefreshAccountQueue();
+            var accountToStart = DequeueNextAccount();
 
             if (accountToStart != null)
             {
+                var timeSinceLastStart = accountToStart.LastStartTime.HasValue ? 
+                    (DateTime.Now - accountToStart.LastStartTime.Value).TotalMinutes : 0;
+                    
+                if (accountToStart.LastStartTime.HasValue)
+                {
+                    Log($"[{accountToStart.Alias}] Последний запуск был: {accountToStart.LastStartTime.Value:yyyy-MM-dd HH:mm:ss}");
+                }
+                
+                Log($"[{accountToStart.Alias}] Время с последнего запуска: {Math.Round(timeSinceLastStart)} минут, требуемая пауза: {_config.TimeConfig.PauseBeatwinIdleTime} минут");
                 Log($"[{accountToStart.Alias}] Запуск первого аккаунта...");
                 _ = StartFarming(accountToStart);
             }
             else
             {
-                var nextAccount = _accounts
-                    .Where(t => t.Enabled && t.MobileAuth?.SharedSecret != null)
-                    .OrderBy(t => t.LastStartTime ?? DateTime.MinValue)
+                var nextAccount = _allAccounts.Values
+                    .Where(t => t.Enabled && !string.IsNullOrEmpty(t.SharedSecret))
+                    .OrderBy(t => t.LastStartTime ?? DateTime.MaxValue)
                     .FirstOrDefault();
 
-                if (nextAccount != null)
+                if (nextAccount != null && nextAccount.LastStartTime.HasValue)
                 {
                     var waitMinutes = _config.TimeConfig.PauseBeatwinIdleTime - 
                         (DateTime.Now - nextAccount.LastStartTime.Value).TotalMinutes;
@@ -279,20 +284,118 @@ namespace DroplerGUI.Core
             }
         }
 
+        private bool ValidateEnvironment()
+        {
+            try
+            {
+                bool needToLoadLogPass = false;
+
+                // Проверка папки аккаунтов
+                if (!Directory.Exists(_accountPath))
+                {
+                    Log("Папка аккаунтов не найдена");
+                    Directory.CreateDirectory(_accountPath);
+                    Log("Создана папка аккаунтов");
+                }
+
+                // Проверяем наличие существующих аккаунтов
+                var existingAccountFiles = Directory.GetFiles(_accountPath, "*.json");
+                bool hasExistingAccounts = existingAccountFiles.Length > 0;
+
+                // Проверка папки Configs
+                string configsPath = Path.Combine(_taskPath, "Configs");
+                if (!Directory.Exists(configsPath))
+                {
+                    Log("Папка Configs не найдена");
+                    Directory.CreateDirectory(configsPath);
+                    Log("Создана папка Configs");
+                }
+
+                // Проверка файла log_pass.txt в папке Configs
+                string logPassPath = Path.Combine(configsPath, "log_pass.txt");
+                if (!File.Exists(logPassPath))
+                {
+                    Log("Файл log_pass.txt не найден");
+                    var template = @"# Формат: login:password
+# Пример:
+# login1:password1
+# login2:password2";
+                    File.WriteAllText(logPassPath, template);
+                    Log("Создан шаблон файла log_pass.txt");
+                    needToLoadLogPass = true;
+                }
+
+                // Проверка папки maFiles
+                string maFilesPath = Path.Combine(_taskPath, "maFiles");
+                if (!Directory.Exists(maFilesPath))
+                {
+                    Log("Папка maFiles не найдена");
+                    Directory.CreateDirectory(maFilesPath);
+                    Log("Создана папка maFiles");
+                }
+
+                // Если есть существующие аккаунты, продолжаем работу
+                if (hasExistingAccounts)
+                {
+                    Log($"Найдено {existingAccountFiles.Length} существующих файлов аккаунтов");
+                    return true;
+                }
+
+                // Если нет существующих аккаунтов, проверяем возможность создания новых
+                var maFiles = Directory.GetFiles(maFilesPath, "*.maFile");
+                if (maFiles.Length == 0)
+                {
+                    Log("В папке maFiles нет файлов");
+                    return false;
+                }
+
+                // Проверка содержимого log_pass.txt
+                var logPassContent = File.ReadAllLines(logPassPath)
+                    .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
+                    .ToList();
+
+                if (logPassContent.Count == 0)
+                {
+                    Log("Файл log_pass.txt пуст и нет существующих аккаунтов");
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Ошибка при проверке окружения: {ex.Message}");
+                return false;
+            }
+        }
+
         private void InitializeWorker()
         {
             Log("Начало процесса запуска фарма...");
-            Log("Загрузка аккаунтов и maFiles...");
             
-            LoadAccounts();
-            if (_accounts.Count == 0)
+            // Проверяем окружение
+            if (!ValidateEnvironment())
             {
-                Log("Не удалось загрузить или создать аккаунты. Проверьте файл log_pass.txt");
+                Log("Проверка окружения не пройдена. Фарм не может быть запущен.");
                 return;
             }
             
+            Log("Загрузка аккаунтов и maFiles...");
+            
+            // Сначала загружаем существующие аккаунты
+            LoadAccounts();
+            
+            // Затем привязываем maFiles к существующим аккаунтам
             BindMaFilesToAccounts();
-            var readyAccounts = _accounts.Count(a => a.Enabled && a.MobileAuth?.SharedSecret != null);
+            
+            // Проверяем наличие аккаунтов после всех операций
+            if (_allAccounts.Count == 0)
+            {
+                Log("Не удалось загрузить или создать аккаунты. Проверьте файл log_pass.txt и наличие maFiles");
+                return;
+            }
+            
+            var readyAccounts = _allAccounts.Values.Count(a => a.Enabled && !string.IsNullOrEmpty(a.SharedSecret));
             if (readyAccounts == 0)
             {
                 Log("Нет аккаунтов, готовых к запуску. Проверьте наличие maFiles и настройки аккаунтов");
@@ -345,6 +448,12 @@ namespace DroplerGUI.Core
                 Log("Начало процесса остановки...");
                 _isInitialized = false;
 
+                // Удаляем текущий экземпляр из статического списка
+                if (_taskInstance != null)
+                {
+                    TaskInstances.Remove(_taskInstance);
+                }
+
                 // Останавливаем таймеры сразу
                 _timer?.Stop();
                 _counterCheckTimer?.Stop();
@@ -380,26 +489,24 @@ namespace DroplerGUI.Core
                 // Ждем завершения всех отключений с общим таймаутом
                 await Task.WhenAll(disconnectTasks).WaitAsync(TimeSpan.FromSeconds(10));
 
-                // Пакетный сброс состояния только активных аккаунтов
-                if (_accounts != null)
+                // Обновляем статусы всех аккаунтов и сохраняем их состояние
+                foreach (var account in _allAccounts.Values)
                 {
-                    var activeAccounts = _accounts.Where(a => a.IdleNow || a.IsRunning || !string.IsNullOrEmpty(a.TaskID));
-                    var accountUpdates = activeAccounts.Select(account =>
-                    {
-                        account.IdleNow = false;
-                        account.IsRunning = false;
-                        account.Action = "none";
-                        account.TaskID = null;
-                        return Task.Run(() => account.Save());
-                    });
-                    
-                    // Параллельное сохранение состояний с таймаутом
-                    await Task.WhenAll(accountUpdates).WaitAsync(TimeSpan.FromSeconds(5));
+                    account.IdleNow = false;
+                    account.IsRunning = false;
+                    account.Action = "none";
+                    account.TaskID = null;
+                    _statisticsService?.UpdateAccountStatus(account.Name, "Offline");
+                    account.Save();
                 }
 
-                // Очистка коллекций
+                // Очищаем все коллекции
+                _allAccounts.Clear();
+                while (_accountQueue.TryDequeue(out _)) { }
+                _activeAccounts.Clear();
                 _activeMachines.Clear();
                 _taskDictionary.Clear();
+                _activeAccountsCount = 0;
 
                 // Останавливаем логгер
                 _logger.Shutdown();
@@ -429,7 +536,12 @@ namespace DroplerGUI.Core
                 
                 // 2. Останавливаем таймеры
                 _timer?.Stop();
+                _timer?.Dispose();
+                _timer = null;
+                
                 _counterCheckTimer?.Stop();
+                _counterCheckTimer?.Dispose();
+                _counterCheckTimer = null;
                 
                 // 3. Отменяем все задачи
                 _cancellationTokenSource?.Cancel();
@@ -447,40 +559,30 @@ namespace DroplerGUI.Core
                     }
                 }
                 
-                // 5. Очищаем коллекции
+                // 5. Очищаем коллекции активных машин и задач
                 _activeMachines.Clear();
                 _taskDictionary.Clear();
                 
-                // 6. Сбрасываем флаги только для активных аккаунтов
-                if (_accounts != null)
+                // 6. Обновляем статусы всех аккаунтов и сохраняем их состояние
+                foreach (var account in _allAccounts.Values)
                 {
-                    var activeAccounts = _accounts.Where(a => a.IdleNow || a.IsRunning || !string.IsNullOrEmpty(a.TaskID));
-                    foreach (var account in activeAccounts)
-                    {
-                        account.IdleNow = false;
-                        account.IsRunning = false;
-                        account.Action = "none";
-                        account.TaskID = null;
-                    }
-                    
-                    // Сохраняем состояния в фоновом режиме только для активных аккаунтов
-                    Task.Run(() => 
-                    {
-                        foreach (var account in activeAccounts)
-                        {
-                            try
-                            {
-                                account.Save();
-                            }
-                            catch
-                            {
-                                // Игнорируем ошибки сохранения
-                            }
-                        }
-                    });
+                    account.IdleNow = false;
+                    account.IsRunning = false;
+                    account.Action = "none";
+                    account.TaskID = null;
+                    _statisticsService?.UpdateAccountStatus(account.Name, "Offline");
+                    account.Save();
                 }
+
+                // 7. Очищаем все коллекции аккаунтов
+                _allAccounts.Clear();
+                while (_accountQueue.TryDequeue(out _)) { }
+                _activeAccounts.Clear();
                 
-                // 7. Останавливаем логгер
+                // 8. Сбрасываем счетчик активных аккаунтов
+                _activeAccountsCount = 0;
+                
+                // 9. Останавливаем логгер
                 _logger.Shutdown();
 
                 Log("Процесс фарминга остановлен");
@@ -493,11 +595,13 @@ namespace DroplerGUI.Core
 
         private void CheckActiveAccountsCount(object sender, ElapsedEventArgs e)
         {
+            if (!_isInitialized) return;
+
             try
             {
                 lock (_activeCountLock)
                 {
-                    int actualCount = _accounts?.Count(a => a.IdleNow) ?? 0;
+                    int actualCount = _allAccounts.Values.Count(a => a.IdleNow);
                     if (actualCount != _activeAccountsCount)
                     {
                         Log($"Корректировка счетчика активных аккаунтов с {_activeAccountsCount} на {actualCount}");
@@ -513,26 +617,24 @@ namespace DroplerGUI.Core
 
         private void CheckToAdd(object sender, ElapsedEventArgs e)
         {
+            if (!_isInitialized) return;
+
             try
             {
-                if (_activeAccountsCount >= _config.ParallelCount)
+                if (_activeAccounts.Count >= _config.ParallelCount)
                 {
                     return;
                 }
 
-                var accountToStart = _accounts
-                    .Where(t => t.Enabled &&
-                              !t.IdleNow &&
-                              !t.IsRunning &&
-                              string.IsNullOrEmpty(t.TaskID) &&
-                              t.MobileAuth?.SharedSecret != null &&
-                              (!t.LastStartTime.HasValue ||
-                               (DateTime.Now - t.LastStartTime.Value).TotalMinutes >= _config.TimeConfig.PauseBeatwinIdleTime))
-                    .OrderBy(t => t.LastStartTime ?? DateTime.MinValue)
-                    .FirstOrDefault();
+                // Обновляем очередь перед проверкой
+                RefreshAccountQueue();
 
+                var accountToStart = DequeueNextAccount();
                 if (accountToStart != null)
                 {
+                    var timeSinceLastStart = accountToStart.LastStartTime.HasValue ? 
+                        (DateTime.Now - accountToStart.LastStartTime.Value).TotalMinutes : 0;
+                    Log($"[{accountToStart.Alias}] Время с последнего запуска: {Math.Round(timeSinceLastStart)} минут, требуемая пауза: {_config.TimeConfig.PauseBeatwinIdleTime} минут");
                     Log($"[{accountToStart.Alias}] Подготовка к запуску...");
                     _ = StartFarming(accountToStart);
                 }
@@ -563,6 +665,7 @@ namespace DroplerGUI.Core
                 account.TaskID = taskId;
                 account.Action = "starting";
                 account.IsRunning = true;
+                AddToActive(account);
 
                 Log($"[{account.Alias}] Создание новой задачи фарма (ID: {taskId})");
 
@@ -640,7 +743,9 @@ namespace DroplerGUI.Core
             account.IsRunning = false;
             account.Action = "none";
             account.TaskID = null;
+            account.LastStartTime = DateTime.Now;
             account.Save();
+            RemoveFromActive(account);
             DecrementActiveCount();
             _taskInstance?.UpdateAccountsState();
         }
@@ -684,139 +789,119 @@ namespace DroplerGUI.Core
         {
             try
             {
-                // Не создаем папку здесь, она должна быть создана в TaskInstance
-                if (!Directory.Exists(_accountPath))
-                {
-                    Log("Папка аккаунтов не найдена");
-                    return;
-                }
+                int loadedAccounts = 0;
+                int skippedAccounts = 0;
+                int newAccounts = 0;
 
                 // Загружаем существующие аккаунты
-                var files = Directory.GetFiles(_accountPath, "*.json");
-                var existingAccounts = new Dictionary<string, AccountConfig>();
-
-                foreach (var file in files)
+                if (Directory.Exists(_accountPath))
                 {
-                    try
+                    var files = Directory.GetFiles(_accountPath, "*.json");
+                    foreach (var file in files)
                     {
-                        var account = JsonConvert.DeserializeObject<AccountConfig>(File.ReadAllText(file));
-                        account.Name = Path.GetFileNameWithoutExtension(file);
-                        account.LastStartTime = DateTime.MinValue;
-                        account.SetTaskPath(_taskPath);
-                        existingAccounts[account.Name.ToLower()] = account;
-                        _accounts.Add(account);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Ошибка при загрузке аккаунта {Path.GetFileName(file)}: {ex.Message}");
-                    }
-                }
-
-                // Проверяем log_pass.txt на наличие новых аккаунтов
-                string logPassPath = Path.Combine(Constants.GetTaskConfigPath(_taskId), "log_pass.txt");
-                if (File.Exists(logPassPath))
-                {
-                    var lines = File.ReadAllLines(logPassPath)
-                        .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
-                        .ToList();
-
-                    foreach (var line in lines)
-                    {
-                        var parts = line.Split(new[] { ':' }, 2);
-                        if (parts.Length != 2)
-                        {
-                            Log($"Пропущена некорректная строка: {line}. Формат должен быть login:password");
-                            continue;
-                        }
-
-                        var login = parts[0].Trim();
-                        var password = parts[1].Trim();
-
-                        if (string.IsNullOrEmpty(login) || string.IsNullOrEmpty(password))
-                        {
-                            Log($"Пропущена строка с пустым логином или паролем: {line}");
-                            continue;
-                        }
-
-                        var loginLower = login.ToLower();
-                        
-                        // Проверяем, существует ли уже такой аккаунт
-                        if (existingAccounts.TryGetValue(loginLower, out var existingAccount))
-                        {
-                            // Проверяем, совпадает ли пароль
-                            if (existingAccount.Password != password)
-                            {
-                                Log($"[WARNING] Обнаружено несоответствие пароля для аккаунта {login}:");
-                                Log($"- В log_pass.txt: {password}");
-                                Log($"- В файле аккаунта: {existingAccount.Password}");
-                                Log($"Для обновления пароля удалите файл аккаунта и при следующем запуске фарма он будет создан с новым паролем, либо отредактируйте его вручную");
-                            }
-                            continue;
-                        }
-
-                        // Проверяем наличие maFile для нового аккаунта
-                        var maFilePath = Path.Combine(Constants.GetTaskPath(_taskId), "maFiles", $"{login}.maFile");
-                        if (!File.Exists(maFilePath))
-                        {
-                            Log($"[WARNING] Для нового аккаунта {login} не найден maFile. Добавьте файл {login}.maFile в папку maFiles и перезапустите фарм");
-                            continue;
-                        }
-
                         try
                         {
-                            var maFileContent = File.ReadAllText(maFilePath);
-                            var mobileAuth = JsonConvert.DeserializeObject<MobileAuth>(maFileContent);
+                            var account = JsonConvert.DeserializeObject<AccountConfig>(File.ReadAllText(file));
+                            account.Name = Path.GetFileNameWithoutExtension(file);
+                            account.SetTaskPath(_taskPath);
                             
-                            if (string.IsNullOrEmpty(mobileAuth?.SharedSecret))
+                            if (account.LastStartTime.HasValue && account.LastStartTime.Value.Year == 1)
                             {
-                                Log($"[WARNING] maFile для аккаунта {login} не содержит SharedSecret. Проверьте корректность файла");
-                                continue;
+                                account.LastStartTime = null;
                             }
-
-                            // Создаем новый аккаунт
-                            var newAccount = new AccountConfig
-                            {
-                                Name = login,
-                                Alias = login,
-                                Password = password,
-                                Enabled = true,
-                                IdleNow = false,
-                                ShowStatus = _config?.ShowStatus ?? "Online",
-                                LastStartTime = DateTime.MinValue,
-                                Action = "none",
-                                MobileAuth = mobileAuth,
-                                SharedSecret = mobileAuth.SharedSecret,
-                                AuthType = (AuthType)2
-                            };
-                            newAccount.SetTaskPath(_taskPath);
-
-                            // Сохраняем файл аккаунта
-                            var accountPath = Path.Combine(_accountPath, $"{login}.json");
-                            File.WriteAllText(accountPath, JsonConvert.SerializeObject(newAccount, Formatting.Indented));
                             
-                            // Добавляем в коллекцию
-                            _accounts.Add(newAccount);
-                            Log($"Создан новый аккаунт: {login} (с привязанным maFile)");
+                            if (_allAccounts.TryAdd(account.Name.ToLower(), account))
+                            {
+                                loadedAccounts++;
+                                if (account.LastStartTime.HasValue)
+                                {
+                                    Log($"[{account.Name}] Загружено время последнего запуска: {account.LastStartTime.Value:yyyy-MM-dd HH:mm:ss}");
+                                }
+                            }
                         }
                         catch (Exception ex)
                         {
-                            Log($"Ошибка при создании аккаунта {login}: {ex.Message}");
+                            Log($"Ошибка при загрузке аккаунта {Path.GetFileName(file)}: {ex.Message}");
+                            skippedAccounts++;
                         }
                     }
                 }
-                else
+
+                // Обрабатываем log_pass.txt для создания новых аккаунтов
+                var newAccountsData = ParseLogPassFile();
+                if (newAccountsData.Any())
                 {
-                    Log("Файл log_pass.txt не найден. Используются только существующие аккаунты");
+                    Log("Обработка новых аккаунтов из log_pass.txt...");
+
+                    // Создаем словарь maFiles по AccountName
+                    var maFilesByAccountName = new Dictionary<string, (string path, string secret)>(StringComparer.OrdinalIgnoreCase);
+                    var maFiles = Directory.GetFiles(Path.Combine(_taskPath, "maFiles"), "*.maFile");
+                    foreach (var maFile in maFiles)
+                    {
+                        try
+                        {
+                            var maFileContent = File.ReadAllText(maFile);
+                            var mobileAuth = JsonConvert.DeserializeObject<MobileAuth>(maFileContent);
+                            if (!string.IsNullOrEmpty(mobileAuth?.AccountName) && !string.IsNullOrEmpty(mobileAuth?.SharedSecret))
+                            {
+                                maFilesByAccountName[mobileAuth.AccountName] = (maFile, mobileAuth.SharedSecret);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"Ошибка при чтении maFile {Path.GetFileName(maFile)}: {ex.Message}");
+                        }
+                    }
+
+                    foreach (var (login, password) in newAccountsData)
+                    {
+                        var accountConfig = new AccountConfig
+                        {
+                            Name = login,
+                            Password = password,
+                            Alias = login,
+                            Enabled = true,
+                            Action = "none",
+                            ShowStatus = _config.ShowStatus
+                        };
+                        accountConfig.SetTaskPath(_taskPath);
+
+                        // Ищем maFile сначала по AccountName
+                        if (maFilesByAccountName.TryGetValue(login, out var maFileInfo))
+                        {
+                            try
+                            {
+                                accountConfig.SharedSecret = maFileInfo.secret;
+                                var accountFilePath = Path.Combine(_accountPath, $"{login}.json");
+                                File.WriteAllText(accountFilePath, JsonConvert.SerializeObject(accountConfig, Formatting.Indented));
+                                
+                                if (_allAccounts.TryAdd(login.ToLower(), accountConfig))
+                                {
+                                    newAccounts++;
+                                    Log($"Создан новый аккаунт: {login} (найден maFile по AccountName: {Path.GetFileName(maFileInfo.path)})");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"Ошибка при создании аккаунта {login}: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            Log($"maFile для аккаунта {login} не найден по AccountName");
+                        }
+                    }
                 }
 
-                if (_accounts.Count == 0)
-                {
-                    Log("Нет аккаунтов для запуска. Проверьте наличие файлов аккаунтов или добавьте новые аккаунты в log_pass.txt");
-                }
-                else
-                {
-                    Log($"Загружено аккаунтов: {_accounts.Count}");
-                }
+                // Выводим итоговую статистику
+                Log("\nСтатистика загрузки аккаунтов:");
+                Log($"- Загружено существующих аккаунтов: {loadedAccounts}");
+                Log($"- Пропущено поврежденных аккаунтов: {skippedAccounts}");
+                Log($"- Создано новых аккаунтов: {newAccounts}");
+                Log($"- Всего аккаунтов в системе: {_allAccounts.Count}");
+
+                // После загрузки всех аккаунтов обновляем очередь
+                RefreshAccountQueue();
             }
             catch (Exception ex)
             {
@@ -828,13 +913,13 @@ namespace DroplerGUI.Core
         {
             try
             {
-                if (_accounts == null || _accounts.Count == 0)
+                if (_allAccounts.Count == 0)
                 {
-                    Log("Нет аккаунтов для привязки maFiles");
+                    Log("Нет аккаунтов для проверки SharedSecret");
                     return;
                 }
 
-                string maFilesPath = Path.Combine(Constants.GetTaskPath(_taskId), "maFiles");
+                string maFilesPath = Path.Combine(_taskPath, "maFiles");
                 if (!Directory.Exists(maFilesPath))
                 {
                     Log($"Директория {maFilesPath} не найдена");
@@ -844,48 +929,210 @@ namespace DroplerGUI.Core
                 var maFiles = Directory.GetFiles(maFilesPath, "*.maFile");
                 if (maFiles.Length == 0)
                 {
-                    Log("maFiles не найдены. Поместите файлы .maFile в папку maFiles");
+                    Log("maFiles не найдены");
                     return;
                 }
 
-                int bound = 0;
-                foreach (var account in _accounts)
+                // Создаем словарь для быстрого поиска maFile по account_name
+                var maFilesByAccountName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var maFile in maFiles)
                 {
-                    // Ищем maFile по имени аккаунта или алиасу
-                    var maFile = maFiles.FirstOrDefault(f => 
-                        Path.GetFileNameWithoutExtension(f).Equals(account.Name, StringComparison.OrdinalIgnoreCase) ||
-                        Path.GetFileNameWithoutExtension(f).Equals(account.Alias, StringComparison.OrdinalIgnoreCase));
-
-                    if (maFile != null)
+                    try
                     {
-                        try
+                        var maFileContent = File.ReadAllText(maFile);
+                        var mobileAuth = JsonConvert.DeserializeObject<MobileAuth>(maFileContent);
+                        if (!string.IsNullOrEmpty(mobileAuth?.AccountName))
                         {
-                            var maFileContent = File.ReadAllText(maFile);
-                            var mobileAuth = JsonConvert.DeserializeObject<MobileAuth>(maFileContent);
-                            
-                            if (string.IsNullOrEmpty(mobileAuth?.SharedSecret))
-                            {
-                                Log($"[WARNING] maFile для аккаунта {account.Name} не содержит SharedSecret");
-                                continue;
-                            }
-
-                            account.MobileAuth = mobileAuth;
-                            account.SharedSecret = mobileAuth.SharedSecret;
-                            bound++;
+                            maFilesByAccountName[mobileAuth.AccountName] = maFile;
                         }
-                        catch (Exception ex)
-                        {
-                            Log($"Ошибка при привязке maFile к аккаунту {account.Name}: {ex.Message}");
-                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"Ошибка при чтении maFile {Path.GetFileName(maFile)}: {ex.Message}");
                     }
                 }
 
-                Log($"Привязано maFiles: {bound} из {_accounts.Count} аккаунтов");
+                int totalAccounts = _allAccounts.Count;
+                int accountsWithSecret = _allAccounts.Values.Count(a => !string.IsNullOrEmpty(a.SharedSecret));
+                int accountsNeedingSecret = _allAccounts.Values.Count(a => string.IsNullOrEmpty(a.SharedSecret));
+                int bound = 0;
+                int failed = 0;
+
+                Log($"\nНачало проверки SharedSecret:");
+                Log($"- Всего аккаунтов: {totalAccounts}");
+                Log($"- Уже имеют SharedSecret: {accountsWithSecret}");
+                Log($"- Требуется привязать SharedSecret: {accountsNeedingSecret}");
+
+                foreach (var account in _allAccounts.Values.Where(a => string.IsNullOrEmpty(a.SharedSecret)))
+                {
+                    // Сначала ищем по AccountName в нашем словаре
+                    if (maFilesByAccountName.TryGetValue(account.Name, out string matchedMaFile))
+                    {
+                        try
+                        {
+                            var maFileContent = File.ReadAllText(matchedMaFile);
+                            var mobileAuth = JsonConvert.DeserializeObject<MobileAuth>(maFileContent);
+
+                            if (string.IsNullOrEmpty(mobileAuth?.SharedSecret))
+                            {
+                                Log($"[WARNING] maFile для аккаунта {account.Name} найден по AccountName, но не содержит SharedSecret");
+                                failed++;
+                                continue;
+                            }
+
+                            account.SharedSecret = mobileAuth.SharedSecret;
+                            account.Save();
+                            bound++;
+                            Log($"Привязан SharedSecret к аккаунту {account.Name} (найдено по AccountName в {Path.GetFileName(matchedMaFile)})");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"Ошибка при чтении maFile для аккаунта {account.Name}: {ex.Message}");
+                            failed++;
+                        }
+                    }
+                    else
+                    {
+                        Log($"maFile для аккаунта {account.Name} не найден по AccountName");
+                        failed++;
+                    }
+                }
+
+                // Выводим итоговую статистику
+                Log($"\nРезультаты привязки SharedSecret:");
+                Log($"- Успешно привязано: {bound}");
+                Log($"- Не удалось привязать: {failed}");
+                Log($"- Всего аккаунтов с SharedSecret: {_allAccounts.Values.Count(a => !string.IsNullOrEmpty(a.SharedSecret))}");
             }
             catch (Exception ex)
             {
-                Log($"Ошибка при привязке maFiles: {ex.Message}");
+                Log($"Ошибка при проверке SharedSecret: {ex.Message}");
             }
+        }
+
+        private void EnqueueAccount(AccountConfig account)
+        {
+            if (account != null && 
+                account.Enabled && 
+                !string.IsNullOrEmpty(account.SharedSecret) &&
+                (!account.LastStartTime.HasValue ||
+                 (DateTime.Now - account.LastStartTime.Value).TotalMinutes >= _config.TimeConfig.PauseBeatwinIdleTime))
+            {
+                _accountQueue.Enqueue(account);
+            }
+        }
+
+        private AccountConfig DequeueNextAccount()
+        {
+            if (_accountQueue.TryDequeue(out var account))
+            {
+                return account;
+            }
+            return null;
+        }
+
+        private void AddToActive(AccountConfig account)
+        {
+            if (account != null)
+            {
+                _activeAccounts.TryAdd(account.Name, account);
+            }
+        }
+
+        private void RemoveFromActive(AccountConfig account)
+        {
+            if (account != null)
+            {
+                _activeAccounts.TryRemove(account.Name, out _);
+            }
+        }
+
+        private void RefreshAccountQueue()
+        {
+            // Очищаем текущую очередь
+            while (_accountQueue.TryDequeue(out _)) { }
+
+            // Добавляем аккаунты, готовые к запуску
+            foreach (var account in _allAccounts.Values
+                .Where(a => a.Enabled &&
+                           !a.IdleNow &&
+                           !a.IsRunning &&
+                           string.IsNullOrEmpty(a.TaskID) &&
+                           !string.IsNullOrEmpty(a.SharedSecret) &&
+                           (!a.LastStartTime.HasValue ||
+                            (DateTime.Now - a.LastStartTime.Value).TotalMinutes >= _config.TimeConfig.PauseBeatwinIdleTime))
+                .OrderBy(a => a.LastStartTime ?? DateTime.MaxValue))
+            {
+                _accountQueue.Enqueue(account);
+            }
+        }
+
+        // Добавляем класс компаратора для HashSet<AccountConfig>
+        private class AccountConfigComparer : IEqualityComparer<AccountConfig>
+        {
+            public bool Equals(AccountConfig x, AccountConfig y)
+            {
+                if (ReferenceEquals(x, y)) return true;
+                if (x is null || y is null) return false;
+                return x.Name.Equals(y.Name, StringComparison.OrdinalIgnoreCase);
+            }
+
+            public int GetHashCode(AccountConfig obj)
+            {
+                return obj.Name?.ToLowerInvariant().GetHashCode() ?? 0;
+            }
+        }
+
+        private List<(string login, string password)> ParseLogPassFile()
+        {
+            var result = new List<(string login, string password)>();
+            string logPassPath = Path.Combine(_taskPath, "Configs", "log_pass.txt");
+            
+            try
+            {
+                var lines = File.ReadAllLines(logPassPath)
+                    .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
+                    .ToList();
+
+                int validLines = 0;
+                int invalidLines = 0;
+
+                foreach (var line in lines)
+                {
+                    var parts = line.Split(':');
+                    if (parts.Length == 2 && 
+                        !string.IsNullOrWhiteSpace(parts[0]) && 
+                        !string.IsNullOrWhiteSpace(parts[1]))
+                    {
+                        string login = parts[0].Trim();
+                        string password = parts[1].Trim();
+                        
+                        // Проверяем, существует ли уже аккаунт с таким логином
+                        if (_allAccounts.ContainsKey(login.ToLower()))
+                        {
+                            Log($"Аккаунт {login} уже существует, пропускаю");
+                            continue;
+                        }
+                        
+                        result.Add((login, password));
+                        validLines++;
+                    }
+                    else
+                    {
+                        invalidLines++;
+                    }
+                }
+
+                Log($"Обработка log_pass.txt завершена:");
+                Log($"- Найдено валидных строк: {validLines}");
+                Log($"- Пропущено невалидных строк: {invalidLines}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Ошибка при обработке log_pass.txt: {ex.Message}");
+            }
+
+            return result;
         }
     }
 } 

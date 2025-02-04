@@ -5,6 +5,7 @@ using System.Linq;
 using Newtonsoft.Json;
 using DroplerGUI.Core;
 using DroplerGUI.Services;
+using System.ComponentModel;
 
 namespace DroplerGUI.Models
 {
@@ -29,32 +30,112 @@ namespace DroplerGUI.Models
         public bool IsRunning { get; private set; }
         public TaskStatus Status { get; private set; }
         
-        // Статистика
-        public int TotalAccounts => _accounts.Count;
-        public int EnabledAccounts => _accounts.Count(a => a.Enabled);
-        public int FarmingAccounts => _accounts.Count(a => a.IdleNow);
+        // Статистика - теперь берем данные напрямую из Worker
+        public int TotalAccounts => Worker?.Accounts.Count() ?? 0;
+        public int EnabledAccounts => Worker?.Accounts.Count(a => a.Enabled) ?? 0;
+        public int FarmingAccounts => Worker?.Accounts.Count(a => a.IdleNow) ?? 0;
+
+        [DisplayNameAttribute("Следующий аккаунт запустится через")]
         public string NextStart
         {
             get
             {
-                if (!LastStartTime.HasValue)
+                if (!IsRunning || Status == TaskStatus.Stopped)
+                    return "-";
+
+                try
+                {
+                    // Получаем активные аккаунты
+                    var activeAccounts = Worker.Accounts
+                        .Where(t => t.IdleNow && t.LastStartTime.HasValue)
+                        .ToList();
+
+                    // Если нет активных аккаунтов, проверяем время паузы для следующего запуска
+                    if (!activeAccounts.Any())
+                    {
+                        var nextAccount = Worker.Accounts
+                            .Where(t => t.Enabled && 
+                                      !t.IdleNow && 
+                                      !t.IsRunning && 
+                                      t.LastStartTime.HasValue && 
+                                      !string.IsNullOrEmpty(t.SharedSecret))
+                            .OrderBy(t => t.LastStartTime)
+                            .FirstOrDefault();
+
+                        if (nextAccount != null)
+                        {
+                            var timeSinceLastStart = (DateTime.Now - nextAccount.LastStartTime.Value).TotalMinutes;
+                            var pauseTimeRemaining = Worker.Config.TimeConfig.PauseBeatwinIdleTime - timeSinceLastStart;
+                            
+                            if (pauseTimeRemaining > 0)
+                            {
+                                return $"{Math.Round(pauseTimeRemaining)} мин";
+                            }
+                        }
+                        
+                        // Если нет аккаунтов с LastStartTime или время паузы истекло
+                        var anyReadyAccounts = Worker.Accounts
+                            .Any(t => t.Enabled && 
+                                    !t.IdleNow && 
+                                    !t.IsRunning && 
+                                    !string.IsNullOrEmpty(t.SharedSecret) &&
+                                    (!t.LastStartTime.HasValue || 
+                                     (DateTime.Now - t.LastStartTime.Value).TotalMinutes >= Worker.Config.TimeConfig.PauseBeatwinIdleTime));
+
+                        return anyReadyAccounts ? "Скоро" : "-";
+                    }
+
+                    // Если есть активные аккаунты, проверяем следующий запуск
+                    var firstToFinish = activeAccounts
+                        .OrderBy(a => a.LastStartTime.Value.AddMinutes(Worker.Config.TimeConfig.IdleTime))
+                        .First();
+
+                    var remainingIdleTime = Worker.Config.TimeConfig.IdleTime - 
+                        (DateTime.Now - firstToFinish.LastStartTime.Value).TotalMinutes;
+
+                    // Проверяем, есть ли аккаунты, готовые к запуску
+                    var nextQueuedAccount = Worker.Accounts
+                        .Where(t => t.Enabled &&
+                                  !t.IdleNow &&
+                                  !t.IsRunning &&
+                                  !string.IsNullOrEmpty(t.SharedSecret))
+                        .OrderBy(t => t.LastStartTime ?? DateTime.MaxValue)
+                        .FirstOrDefault();
+
+                    if (nextQueuedAccount == null)
+                    {
+                        return "-";
+                    }
+
+                    // Проверяем время паузы для следующего аккаунта
+                    var remainingPauseTime = 0.0;
+                    if (nextQueuedAccount.LastStartTime.HasValue)
+                    {
+                        var timeSinceLastStart = (DateTime.Now - nextQueuedAccount.LastStartTime.Value).TotalMinutes;
+                        if (timeSinceLastStart < Worker.Config.TimeConfig.PauseBeatwinIdleTime)
+                        {
+                            remainingPauseTime = Worker.Config.TimeConfig.PauseBeatwinIdleTime - timeSinceLastStart;
+                        }
+                    }
+
+                    // Если есть место для нового аккаунта и он готов к запуску
+                    if (Worker.ActiveAccountsCount < Worker.Config.ParallelCount && 
+                        (remainingPauseTime <= 0 || !nextQueuedAccount.LastStartTime.HasValue))
+                    {
+                        return "Скоро";
+                    }
+
+                    // Общее время ожидания - максимум из оставшегося IdleTime и PauseBeatwinIdleTime
+                    var totalWaitTime = Math.Max(remainingIdleTime, remainingPauseTime);
+                    return $"{Math.Round(totalWaitTime)} мин";
+                }
+                catch (Exception)
                 {
                     return "-";
                 }
-
-                var nextStart = LastStartTime.Value.AddMinutes(Config?.TimeConfig?.IdleTime ?? 180);
-                var timeUntilNext = nextStart - DateTime.Now;
-
-                if (timeUntilNext.TotalMinutes > 0)
-                {
-                    return $"{timeUntilNext.Hours:D2}:{timeUntilNext.Minutes:D2}:{timeUntilNext.Seconds:D2}";
-                }
-
-                return "Скоро";
             }
         }
         
-        private readonly HashSet<AccountConfig> _accounts = new HashSet<AccountConfig>();
         private TaskWorker _worker;
         
         public TaskInstance(int taskNumber, string basePath)
@@ -73,9 +154,6 @@ namespace DroplerGUI.Models
             StatisticsService = new StatisticsService(taskNumber);
             _worker = new TaskWorker(TaskPath, StatisticsService, taskNumber);
             _worker.SetTaskInstance(this);
-            
-            // И наконец загружаем аккаунты
-            LoadAccounts();
         }
         
         private void InitializeDirectories()
@@ -104,31 +182,6 @@ namespace DroplerGUI.Models
 # login1:password1
 # login2:password2";
                 File.WriteAllText(logPassPath, template);
-            }
-        }
-        
-        private void LoadAccounts()
-        {
-            _accounts.Clear();
-            
-            if (!Directory.Exists(AccountsPath))
-            {
-                return;
-            }
-
-            var files = Directory.GetFiles(AccountsPath, "*.json");
-            foreach (var file in files)
-            {
-                try
-                {
-                    var account = JsonConvert.DeserializeObject<AccountConfig>(File.ReadAllText(file));
-                    account.Name = Path.GetFileNameWithoutExtension(file);
-                    _accounts.Add(account);
-                }
-                catch
-                {
-                    // Игнорируем ошибки при загрузке отдельных аккаунтов
-                }
             }
         }
         
@@ -203,6 +256,7 @@ namespace DroplerGUI.Models
                 Status = TaskStatus.Stopping;
                 _worker.Stop();
                 IsRunning = false;
+                LastStartTime = null;
                 Status = TaskStatus.Stopped;
             }
             catch (Exception ex)
@@ -215,37 +269,17 @@ namespace DroplerGUI.Models
 
         public (int Total, int Enabled, int Farming) GetAccountsInfo()
         {
-            UpdateAccountsState();
             return (
-                Total: _accounts.Count,
-                Enabled: _accounts.Count(a => a.Enabled),
-                Farming: _accounts.Count(a => a.IdleNow)
+                Total: TotalAccounts,
+                Enabled: EnabledAccounts,
+                Farming: FarmingAccounts
             );
         }
 
         public void UpdateAccountsState()
         {
-            if (!Directory.Exists(AccountsPath))
-            {
-                return;
-            }
-
-            _accounts.Clear();
-            var files = Directory.GetFiles(AccountsPath, "*.json");
-
-            foreach (var file in files)
-            {
-                try
-                {
-                    var account = JsonConvert.DeserializeObject<AccountConfig>(File.ReadAllText(file));
-                    account.Name = Path.GetFileNameWithoutExtension(file);
-                    _accounts.Add(account);
-                }
-                catch
-                {
-                    // Игнорируем ошибки при загрузке отдельных аккаунтов
-                }
-            }
+            // Теперь этот метод просто уведомляет UI об изменениях
+            // Все данные берутся напрямую из Worker через свойства выше
         }
 
         public void SaveConfig()

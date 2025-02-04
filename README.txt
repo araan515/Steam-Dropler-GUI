@@ -9,6 +9,9 @@ Dropler GUI by araan515
 5. Запустите DroplerGUI.exe
 6. При создании нового потока шаги №2 и №3 повторить для соотвсетвующей папки Task_N
 
+UPD. файлы maFiles нужны только для создания новых файлов аккаунтов. Если у Вас уже имеются созданные файлы {account_name}.json проверьте, чтоб в них имелись заполненные обязательные флаги "alias", "password" и "SharedSecret". 
+Если такие файлы имеются просто поместите их в папку Accounts и запустите фарм.
+
 Требования:
 - Windows
 - .NET 8.0 или выше (https://dotnet.microsoft.com/download/dotnet/8.0)
@@ -16,5 +19,5 @@ Dropler GUI by araan515
 
 
 Поддержка:
-- Исходный код: https://github.com/Pirozhok40/Dropler-GUI/
-- Обсуждения и проблемы: https://github.com/Pirozhok40/Dropler-GUI/issues 
+- Исходный код: https://github.com/araan515/Dropler-GUI/
+- Обсуждения и проблемы: https://github.com/araan515/Dropler-GUI/issues 

@@ -51,18 +51,21 @@ namespace DroplerGUI.Services
         {
             if (string.IsNullOrEmpty(accountName)) return;
 
-            var stats = GetAccountStatistics(accountName);
-            if (stats == null)
+            lock (_lock)
             {
-                Log($"Не удалось получить статистику для аккаунта {accountName}");
-                return;
+                var stats = GetAccountStatistics(accountName);
+                if (stats == null)
+                {
+                    Log($"Не удалось получить статистику для аккаунта {accountName}");
+                    return;
+                }
+
+                stats.TotalDropsCount++;
+                stats.LastDropTime = DateTime.Now;
+
+                SaveStatistics();
+                Log($"[{accountName}] Обновлена статистика: всего дропов {stats.TotalDropsCount}");
             }
-
-            stats.TotalDropsCount++;
-            stats.LastDropTime = DateTime.Now;
-
-            SaveStatistics();
-            Log($"[{accountName}] Обновлена статистика: всего дропов {stats.TotalDropsCount}");
         }
 
         public void UpdateAccountStatus(string accountName, string status)
@@ -158,33 +161,34 @@ namespace DroplerGUI.Services
 
         public void AddDrop(string accountName, uint appId, string itemDefId)
         {
-            var accountStats = GetOrCreateAccountStats(accountName);
-            var dropKey = $"{appId}_{itemDefId}";
-            
-            if (!accountStats.Drops.ContainsKey(dropKey))
+            if (string.IsNullOrEmpty(accountName)) return;
+
+            lock (_lock)
             {
-                accountStats.Drops[dropKey] = 0;
+                var accountStats = GetOrCreateAccountStats(accountName);
+                var dropKey = $"{appId}_{itemDefId}";
+                
+                if (!accountStats.Drops.ContainsKey(dropKey))
+                {
+                    accountStats.Drops[dropKey] = 0;
+                }
+                
+                accountStats.Drops[dropKey]++;
+                accountStats.LastDropTime = DateTime.Now;
+                accountStats.TotalDropsCount++;
+                
+                SaveStatistics();
+                Log($"Статистика обновлена для {accountName} (всего дропов: {accountStats.TotalDropsCount})");
             }
-            
-            accountStats.Drops[dropKey]++;
-            accountStats.LastDropTime = DateTime.Now;
-            accountStats.TotalDropsCount++;
-            
-            SaveStatistics();
-            Log($"Статистика обновлена для {accountName} (всего дропов: {accountStats.TotalDropsCount})");
         }
 
         private AccountStatistics GetOrCreateAccountStats(string accountName)
         {
-            if (!_statistics.ContainsKey(accountName))
+            return _statistics.GetOrAdd(accountName, name => new AccountStatistics
             {
-                _statistics[accountName] = new AccountStatistics
-                {
-                    AccountName = accountName
-                };
-            }
-            
-            return _statistics[accountName];
+                AccountName = name,
+                Drops = new Dictionary<string, int>()
+            });
         }
 
         private void Log(string message)
