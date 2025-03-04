@@ -21,6 +21,8 @@ namespace DroplerGUI.Core
         private static readonly object _staticLogLock = new object();
         private static Dictionary<uint, Dictionary<string, string>> _gameDB = new Dictionary<uint, Dictionary<string, string>>();
         private static Dictionary<string, Task> _taskDictionary = new Dictionary<string, Task>();
+        private static DateTime? _lastLoginAttempt;
+        private static readonly object _lastLoginLock = new object();
         
         // Публичные статические свойства
         public static Dictionary<uint, Dictionary<string, string>> GameDB => _gameDB;
@@ -38,6 +40,7 @@ namespace DroplerGUI.Core
         // Таймеры
         private System.Timers.Timer _counterCheckTimer;
         private System.Timers.Timer _timer;
+        private System.Timers.Timer _scheduleTimer;
         
         // Токен отмены
         private CancellationTokenSource _cancellationTokenSource;
@@ -52,6 +55,7 @@ namespace DroplerGUI.Core
 
         private readonly object _initLock = new object();
         private bool _isInitialized = false;
+        private bool _isRunning = false;
 
         // Коллекции
         private HashSet<AccountConfig> _accounts;
@@ -70,6 +74,8 @@ namespace DroplerGUI.Core
         public IEnumerable<AccountConfig> Accounts => _allAccounts.Values;
         public MainConfig Config => _config;
         public int ActiveAccountsCount => _activeAccounts.Count;
+
+        private DateTime _lastAccountStartTime = DateTime.MinValue;
 
         public void SetTaskInstance(TaskInstance taskInstance)
         {
@@ -144,6 +150,12 @@ namespace DroplerGUI.Core
             _logger = new TaskLoggingService(_taskPath, taskId);
             _config = MainConfig.GetConfig(taskId);
             
+            // Загружаем конфигурацию расписания
+            if (_config.Schedule == null)
+            {
+                _config.Schedule = ScheduleConfig.Load(taskId);
+            }
+            
             // Инициализируем коллекции
             _accounts = new HashSet<AccountConfig>(new AccountConfigComparer());
             _allAccounts = new ConcurrentDictionary<string, AccountConfig>(StringComparer.OrdinalIgnoreCase);
@@ -166,41 +178,69 @@ namespace DroplerGUI.Core
 
         public void Start()
         {
-            _config = MainConfig.GetConfig(_taskId);
-
-            // Сбрасываем флаги для всех аккаунтов при старте
-            foreach (var account in _allAccounts.Values)
-            {
-                account.IdleNow = false;
-                account.IsRunning = false;
-                account.Action = "none";
-                account.TaskID = null;
-                account.Save();
-            }
-
-            // Проверяем и корректируем StartTimeOut
-            if (_config.StartTimeOut < MIN_START_TIMEOUT)
-            {
-                Log($"StartTimeOut установлен меньше минимального значения ({MIN_START_TIMEOUT} сек). Устанавливаю {MIN_START_TIMEOUT} сек.");
-                _config.StartTimeOut = MIN_START_TIMEOUT;
-            }
-
-            // Проверяем ParallelCount
-            if (_config.ParallelCount <= 0)
-            {
-                Log($"ParallelCount установлен в {_config.ParallelCount}. Устанавливаю значение 1");
-                _config.ParallelCount = 1;
-            }
+            if (_isRunning)
+                return;
 
             try
             {
-                LogStartupInfo();
-                StartFirstAccount();
+                _config = MainConfig.GetConfig(_taskId);
+                
+                // Проверяем и загружаем конфигурацию расписания
+                if (_config.Schedule == null)
+                {
+                    _config.Schedule = ScheduleConfig.Load(_taskId);
+                    Log("Загружена конфигурация расписания");
+                }
+
+                // Сбрасываем флаги для всех аккаунтов при старте
+                foreach (var account in _allAccounts.Values)
+                {
+                    account.IdleNow = false;
+                    account.IsRunning = false;
+                    account.Action = "none";
+                    account.TaskID = null;
+                    account.Save();
+                }
+
+                // Проверяем и корректируем StartTimeOut
+                if (_config.StartTimeOut < MIN_START_TIMEOUT)
+                {
+                    Log($"StartTimeOut установлен меньше минимального значения ({MIN_START_TIMEOUT} сек). Устанавливаю {MIN_START_TIMEOUT} сек.");
+                    _config.StartTimeOut = MIN_START_TIMEOUT;
+                }
+
+                // Проверяем ParallelCount
+                if (_config.ParallelCount <= 0)
+                {
+                    Log($"ParallelCount установлен в {_config.ParallelCount}. Устанавливаю значение 1");
+                    _config.ParallelCount = 1;
+                }
+
+                _isRunning = true;
+                Initialize();
+
+                try
+                {
+                    LogStartupInfo();
+                    StartFirstAccount();
+                }
+                catch (IOException)
+                {
+                    LogStartupInfo();
+                }
+
+                // Явно инициализируем и запускаем таймеры
+                InitializeTimers();
+                
+                // Сразу проверяем расписание
+                CheckSchedule(null, null);
+                
+                Log("Процесс запущен и работает");
             }
-            catch (IOException)
+            catch (Exception ex)
             {
-                // Если не удалось установить цвет, логируем без цвета
-                LogStartupInfo();
+                Log($"Ошибка при запуске: {ex.Message}");
+                _isRunning = false;
             }
         }
 
@@ -273,7 +313,47 @@ namespace DroplerGUI.Core
 
                 try
                 {
-                    InitializeWorker();
+                    Log("Начало процесса запуска фарма...");
+                    
+                    // Проверяем окружение
+                    if (!ValidateEnvironment())
+                    {
+                        Log("Проверка окружения не пройдена. Фарм не может быть запущен.");
+                        return;
+                    }
+                    
+                    Log("Загрузка аккаунтов и maFiles...");
+                    
+                    // Сначала загружаем существующие аккаунты
+                    LoadAccounts();
+                    
+                    // Затем привязываем maFiles к существующим аккаунтам
+                    BindMaFilesToAccounts();
+                    
+                    // Проверяем наличие аккаунтов после всех операций
+                    if (_allAccounts.Count == 0)
+                    {
+                        Log("Не удалось загрузить или создать аккаунты. Проверьте файл log_pass.txt и наличие maFiles");
+                        return;
+                    }
+                    
+                    var readyAccounts = _allAccounts.Values.Count(a => a.Enabled && !string.IsNullOrEmpty(a.SharedSecret));
+                    if (readyAccounts == 0)
+                    {
+                        Log("Нет аккаунтов, готовых к запуску. Проверьте наличие maFiles и настройки аккаунтов");
+                        return;
+                    }
+
+                    // Инициализируем таймеры
+                    InitializeTimers();
+                    _isInitialized = true;
+                    Log($"Инициализация завершена успешно. Запуск аккаунтов каждые {_config.StartTimeOut} секунд");
+
+                    // Запускаем процесс
+                    Start();
+                    
+                    // Сразу проверяем расписание
+                    CheckSchedule(null, null);
                 }
                 catch (Exception ex)
                 {
@@ -288,76 +368,41 @@ namespace DroplerGUI.Core
         {
             try
             {
-                bool needToLoadLogPass = false;
+                // Проверяем наличие всех необходимых директорий
+                if (!Directory.Exists(_taskPath))
+                {
+                    Log($"Создание директории задачи: {_taskPath}");
+                    Directory.CreateDirectory(_taskPath);
+                }
 
-                // Проверка папки аккаунтов
                 if (!Directory.Exists(_accountPath))
                 {
-                    Log("Папка аккаунтов не найдена");
+                    Log($"Создание директории аккаунтов: {_accountPath}");
                     Directory.CreateDirectory(_accountPath);
-                    Log("Создана папка аккаунтов");
                 }
 
-                // Проверяем наличие существующих аккаунтов
-                var existingAccountFiles = Directory.GetFiles(_accountPath, "*.json");
-                bool hasExistingAccounts = existingAccountFiles.Length > 0;
-
-                // Проверка папки Configs
-                string configsPath = Path.Combine(_taskPath, "Configs");
-                if (!Directory.Exists(configsPath))
+                // Проверяем наличие конфигурационных файлов
+                var configPath = Path.Combine(_taskPath, "Configs");
+                if (!Directory.Exists(configPath))
                 {
-                    Log("Папка Configs не найдена");
-                    Directory.CreateDirectory(configsPath);
-                    Log("Создана папка Configs");
+                    Log($"Создание директории конфигурации: {configPath}");
+                    Directory.CreateDirectory(configPath);
                 }
 
-                // Проверка файла log_pass.txt в папке Configs
-                string logPassPath = Path.Combine(configsPath, "log_pass.txt");
-                if (!File.Exists(logPassPath))
+                // Проверяем наличие директории для логов
+                var logsPath = Path.Combine(_taskPath, "Logs");
+                if (!Directory.Exists(logsPath))
                 {
-                    Log("Файл log_pass.txt не найден");
-                    var template = @"# Формат: login:password
-# Пример:
-# login1:password1
-# login2:password2";
-                    File.WriteAllText(logPassPath, template);
-                    Log("Создан шаблон файла log_pass.txt");
-                    needToLoadLogPass = true;
+                    Log($"Создание директории логов: {logsPath}");
+                    Directory.CreateDirectory(logsPath);
                 }
 
-                // Проверка папки maFiles
-                string maFilesPath = Path.Combine(_taskPath, "maFiles");
-                if (!Directory.Exists(maFilesPath))
+                // Проверяем наличие директории для истории дропов
+                var dropHistoryPath = Path.Combine(_taskPath, "DropHistory");
+                if (!Directory.Exists(dropHistoryPath))
                 {
-                    Log("Папка maFiles не найдена");
-                    Directory.CreateDirectory(maFilesPath);
-                    Log("Создана папка maFiles");
-                }
-
-                // Если есть существующие аккаунты, продолжаем работу
-                if (hasExistingAccounts)
-                {
-                    Log($"Найдено {existingAccountFiles.Length} существующих файлов аккаунтов");
-                    return true;
-                }
-
-                // Если нет существующих аккаунтов, проверяем возможность создания новых
-                var maFiles = Directory.GetFiles(maFilesPath, "*.maFile");
-                if (maFiles.Length == 0)
-                {
-                    Log("В папке maFiles нет файлов");
-                    return false;
-                }
-
-                // Проверка содержимого log_pass.txt
-                var logPassContent = File.ReadAllLines(logPassPath)
-                    .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("#"))
-                    .ToList();
-
-                if (logPassContent.Count == 0)
-                {
-                    Log("Файл log_pass.txt пуст и нет существующих аккаунтов");
-                    return false;
+                    Log($"Создание директории истории дропов: {dropHistoryPath}");
+                    Directory.CreateDirectory(dropHistoryPath);
                 }
 
                 return true;
@@ -411,186 +456,217 @@ namespace DroplerGUI.Core
 
         private void InitializeTimers()
         {
-            // Останавливаем существующие таймеры
-            _counterCheckTimer?.Stop();
-            _counterCheckTimer?.Dispose();
-            _timer?.Stop();
-            _timer?.Dispose();
+            try
+            {
+                Log("Инициализация таймеров...");
+                
+                // Останавливаем существующие таймеры
+                if (_counterCheckTimer != null)
+                {
+                    Log("Остановка существующего таймера проверки аккаунтов");
+                    _counterCheckTimer.Stop();
+                    _counterCheckTimer.Elapsed -= CheckActiveAccountsCount;
+                    _counterCheckTimer.Dispose();
+                    _counterCheckTimer = null;
+                }
+                
+                if (_timer != null)
+                {
+                    Log("Остановка существующего таймера запуска аккаунтов");
+                    _timer.Stop();
+                    _timer.Elapsed -= CheckToAdd;
+                    _timer.Dispose();
+                    _timer = null;
+                }
+                
+                if (_scheduleTimer != null)
+                {
+                    Log("Остановка существующего таймера расписания");
+                    _scheduleTimer.Stop();
+                    _scheduleTimer.Elapsed -= CheckSchedule;
+                    _scheduleTimer.Dispose();
+                    _scheduleTimer = null;
+                }
 
-            // Инициализируем таймер проверки активных аккаунтов
-            _counterCheckTimer = new System.Timers.Timer(10000);
-            _counterCheckTimer.Elapsed += CheckActiveAccountsCount;
-            _counterCheckTimer.AutoReset = true;
-            _counterCheckTimer.Start();
+                // Инициализируем таймер проверки активных аккаунтов
+                _counterCheckTimer = new System.Timers.Timer(10000); // 10 секунд
+                _counterCheckTimer.Elapsed += CheckActiveAccountsCount;
+                _counterCheckTimer.AutoReset = true;
+                Log("Создан таймер проверки активных аккаунтов (интервал: 10 секунд)");
 
-            // Инициализируем таймер запуска аккаунтов
-            _timer = new System.Timers.Timer(1000 * Math.Max(_config.StartTimeOut, MIN_START_TIMEOUT));
-            _timer.Elapsed += CheckToAdd;
-            _timer.AutoReset = true;
-            _timer.Start();
+                // Инициализируем таймер запуска аккаунтов
+                var startTimeout = Math.Max(_config.StartTimeOut, MIN_START_TIMEOUT);
+                _timer = new System.Timers.Timer(1000 * startTimeout);
+                _timer.Elapsed += CheckToAdd;
+                _timer.AutoReset = true;
+                Log($"Создан таймер запуска аккаунтов (интервал: {startTimeout} секунд)");
 
-            // Сбрасываем токен отмены
-            _cancellationTokenSource?.Cancel();
-            _cancellationTokenSource?.Dispose();
-            _cancellationTokenSource = new CancellationTokenSource();
+                // Инициализируем таймер для проверки расписания
+                _scheduleTimer = new System.Timers.Timer(60000); // Проверяем каждую минуту
+                _scheduleTimer.Elapsed += CheckSchedule;
+                _scheduleTimer.AutoReset = true;
+                Log("Создан таймер проверки расписания (интервал: 1 минута)");
+
+                // Запускаем все таймеры
+                _counterCheckTimer.Start();
+                _timer.Start();
+                _scheduleTimer.Start();
+                Log("Все таймеры запущены");
+
+                // Сбрасываем токен отмены
+                _cancellationTokenSource?.Cancel();
+                _cancellationTokenSource?.Dispose();
+                _cancellationTokenSource = new CancellationTokenSource();
+
+                Log("Таймеры успешно инициализированы");
+            }
+            catch (Exception ex)
+            {
+                Log($"Ошибка при инициализации таймеров: {ex.Message}");
+                throw; // Пробрасываем исключение дальше, так как это критическая ошибка
+            }
+        }
+
+        private void CheckSchedule(object sender, ElapsedEventArgs e)
+        {
+            try
+            {
+                if (_config?.Schedule == null)
+                {
+                    _config.Schedule = ScheduleConfig.Load(_taskId);
+                    if (_config.Schedule == null)
+                    {
+                        Log("Ошибка загрузки конфигурации расписания");
+                        return;
+                    }
+                }
+
+                if (!_config.Schedule.UseSchedule || _config.Schedule.Intervals == null || !_config.Schedule.Intervals.Any())
+                {
+                    return;
+                }
+
+                var currentTime = DateTime.Now.ToString("HH:mm");
+                var shouldStart = _config.Schedule.Intervals.Any(i => i.StartTime == currentTime);
+                var shouldStop = _config.Schedule.Intervals.Any(i => i.StopTime == currentTime);
+
+                if (shouldStart && !_isRunning)
+                {
+                    Log("Запуск по расписанию");
+                    Run();
+                }
+                else if (shouldStop && _isRunning)
+                {
+                    Log("Остановка по расписанию");
+                    Stop();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Ошибка при проверке расписания: {ex.Message}");
+            }
         }
 
         public async Task StopAsync()
         {
             try
             {
-                if (!_isInitialized)
-                {
-                    Log("Процесс фарминга не был запущен");
-                    return;
-                }
-
-                Log("Начало процесса остановки...");
-                _isInitialized = false;
-
-                // Удаляем текущий экземпляр из статического списка
-                if (_taskInstance != null)
-                {
-                    TaskInstances.Remove(_taskInstance);
-                }
-
-                // Останавливаем таймеры сразу
+                Log("Начинаю остановку TaskWorker...");
+                
+                // Останавливаем таймеры
                 _timer?.Stop();
                 _counterCheckTimer?.Stop();
+                _scheduleTimer?.Stop();
 
-                // Отменяем все задачи через CancellationToken
-                _cancellationTokenSource.Cancel();
+                // Отменяем все операции через токен
+                _cancellationTokenSource?.Cancel();
 
-                // Параллельное отключение всех машин с таймаутом
-                var disconnectTasks = _activeMachines.Values.Select(async machine =>
+                // Ждем завершения всех активных процессов
+                var stopTasks = new List<Task>();
+                foreach (var machine in _activeMachines.Values.ToList()) // Создаем копию списка
                 {
-                    try
+                    stopTasks.Add(Task.Run(async () =>
                     {
-                        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                        await Task.Run(() => 
+                        try
                         {
-                            try
-                            {
-                                machine.LogOf();
-                                return Task.CompletedTask;
-                            }
-                            catch
-                            {
-                                return Task.CompletedTask;
-                            }
-                        }, timeoutCts.Token);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Ошибка при остановке машины: {ex.Message}");
-                    }
-                });
+                            machine.LogOf();
+                            // Ждем некоторое время, чтобы убедиться, что процесс действительно остановился
+                            await Task.Delay(1000);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"Ошибка при остановке машины: {ex.Message}");
+                        }
+                    }));
+                }
 
-                // Ждем завершения всех отключений с общим таймаутом
-                await Task.WhenAll(disconnectTasks).WaitAsync(TimeSpan.FromSeconds(10));
-
-                // Обновляем статусы всех аккаунтов и сохраняем их состояние
-                foreach (var account in _allAccounts.Values)
+                // Ждем завершения всех задач остановки
+                if (stopTasks.Any())
                 {
-                    account.IdleNow = false;
-                    account.IsRunning = false;
-                    account.Action = "none";
-                    account.TaskID = null;
-                    _statisticsService?.UpdateAccountStatus(account.Name, "Offline");
-                    account.Save();
+                    await Task.WhenAll(stopTasks);
+                    // Даем дополнительное время на завершение всех процессов
+                    await Task.Delay(2000);
                 }
 
                 // Очищаем все коллекции
-                _allAccounts.Clear();
-                while (_accountQueue.TryDequeue(out _)) { }
-                _activeAccounts.Clear();
+                foreach (var account in _activeAccounts.Values.ToList())
+                {
+                    CleanupAccount(account);
+                }
+                
                 _activeMachines.Clear();
-                _taskDictionary.Clear();
-                _activeAccountsCount = 0;
+                _accountQueue.Clear();
+                _activeAccounts.Clear();
+                
+                // Сбрасываем счетчик активных аккаунтов
+                lock (_activeCountLock)
+                {
+                    _activeAccountsCount = 0;
+                }
 
-                // Останавливаем логгер
-                _logger.Shutdown();
-
-                Log("Процесс фарминга остановлен");
+                _isRunning = false;
+                _isInitialized = false;
+                Log("TaskWorker успешно остановлен");
             }
             catch (Exception ex)
             {
-                Log($"Ошибка при остановке: {ex.Message}");
+                Log($"Ошибка при остановке TaskWorker: {ex.Message}");
+                throw;
             }
         }
 
+        // Синхронный метод-обертка для обратной совместимости
         public void Stop()
         {
-            try
+            StopAsync().GetAwaiter().GetResult();
+        }
+
+        // Метод для полной остановки, включая таймер расписания
+        public void ShutDown()
+        {
+            Stop();
+            
+            // Останавливаем таймер расписания
+            if (_scheduleTimer != null)
             {
-                if (!_isInitialized)
-                {
-                    Log("Процесс фарминга не был запущен");
-                    return;
-                }
-
-                Log("Начало процесса остановки...");
-                
-                // 1. Сразу отмечаем как неинициализированный
-                _isInitialized = false;
-                
-                // 2. Останавливаем таймеры
-                _timer?.Stop();
-                _timer?.Dispose();
-                _timer = null;
-                
-                _counterCheckTimer?.Stop();
-                _counterCheckTimer?.Dispose();
-                _counterCheckTimer = null;
-                
-                // 3. Отменяем все задачи
-                _cancellationTokenSource?.Cancel();
-                
-                // 4. Быстрое отключение машин без ожидания
-                foreach (var machine in _activeMachines.Values.ToList())
-                {
-                    try
-                    {
-                        Task.Run(() => machine.LogOf());
-                    }
-                    catch
-                    {
-                        // Игнорируем ошибки при отключении
-                    }
-                }
-                
-                // 5. Очищаем коллекции активных машин и задач
-                _activeMachines.Clear();
-                _taskDictionary.Clear();
-                
-                // 6. Обновляем статусы всех аккаунтов и сохраняем их состояние
-                foreach (var account in _allAccounts.Values)
-                {
-                    account.IdleNow = false;
-                    account.IsRunning = false;
-                    account.Action = "none";
-                    account.TaskID = null;
-                    _statisticsService?.UpdateAccountStatus(account.Name, "Offline");
-                    account.Save();
-                }
-
-                // 7. Очищаем все коллекции аккаунтов
-                _allAccounts.Clear();
-                while (_accountQueue.TryDequeue(out _)) { }
-                _activeAccounts.Clear();
-                
-                // 8. Сбрасываем счетчик активных аккаунтов
-                _activeAccountsCount = 0;
-                
-                // 9. Останавливаем логгер
-                _logger.Shutdown();
-
-                Log("Процесс фарминга остановлен");
+                Log("Остановка таймера расписания");
+                _scheduleTimer.Stop();
+                _scheduleTimer.Dispose();
+                _scheduleTimer = null;
             }
-            catch (Exception ex)
-            {
-                Log($"Ошибка при остановке: {ex.Message}");
-            }
+            
+            _isInitialized = false;
+            
+            // Очищаем все коллекции
+            _allAccounts.Clear();
+            while (_accountQueue.TryDequeue(out _)) { }
+            _activeAccounts.Clear();
+            _activeAccountsCount = 0;
+
+            // Останавливаем логгер
+            _logger.Shutdown();
+            
+            Log("Программа полностью остановлена");
         }
 
         private void CheckActiveAccountsCount(object sender, ElapsedEventArgs e)
@@ -626,22 +702,30 @@ namespace DroplerGUI.Core
                     return;
                 }
 
+                // Проверяем, прошло ли достаточно времени с последнего запуска
+                var timeSinceLastStart = (DateTime.Now - _lastAccountStartTime).TotalSeconds;
+                if (timeSinceLastStart < _config.StartTimeOut)
+                {
+                    return;
+                }
+
                 // Обновляем очередь перед проверкой
                 RefreshAccountQueue();
 
                 var accountToStart = DequeueNextAccount();
                 if (accountToStart != null)
                 {
-                    var timeSinceLastStart = accountToStart.LastStartTime.HasValue ? 
+                    var timeSinceLastIdle = accountToStart.LastStartTime.HasValue ? 
                         (DateTime.Now - accountToStart.LastStartTime.Value).TotalMinutes : 0;
-                    Log($"[{accountToStart.Alias}] Время с последнего запуска: {Math.Round(timeSinceLastStart)} минут, требуемая пауза: {_config.TimeConfig.PauseBeatwinIdleTime} минут");
+                    Log($"[{accountToStart.Alias}] Время с последнего запуска: {Math.Round(timeSinceLastIdle)} минут, требуемая пауза: {_config.TimeConfig.PauseBeatwinIdleTime} минут");
                     Log($"[{accountToStart.Alias}] Подготовка к запуску...");
+                    _lastAccountStartTime = DateTime.Now;
                     _ = StartFarming(accountToStart);
                 }
             }
             catch (Exception ex)
             {
-                Log($"Ошибка при проверке аккаунтов для запуска: {ex.Message}");
+                Log($"Ошибка при проверке запуска нового аккаунта: {ex.Message}");
             }
         }
 
@@ -726,14 +810,24 @@ namespace DroplerGUI.Core
             }
             catch (OperationCanceledException)
             {
-                // При остановке не выводим дополнительных сообщений
+                Log($"[{account.Alias}] Остановка по запросу");
             }
             finally
             {
-                machine.LogOf();
-                CleanupAccount(account);
-                RemoveActiveMachine(account.Name);
-                _statisticsService?.UpdateAccountStatus(account.Name, "Offline");
+                try
+                {
+                    machine.LogOf();
+                    // Ждем некоторое время после LogOf
+                    await Task.Delay(1000);
+                    CleanupAccount(account);
+                    RemoveActiveMachine(account.Name);
+                    _statisticsService?.UpdateAccountStatus(account.Name, "Offline");
+                    Log($"[{account.Alias}] Успешно остановлен");
+                }
+                catch (Exception ex)
+                {
+                    Log($"[{account.Alias}] Ошибка при очистке: {ex.Message}");
+                }
             }
         }
 
@@ -1133,6 +1227,22 @@ namespace DroplerGUI.Core
             }
 
             return result;
+        }
+
+        public static DateTime? GetLastLoginAttempt()
+        {
+            lock (_lastLoginLock)
+            {
+                return _lastLoginAttempt;
+            }
+        }
+
+        public static void UpdateLastLoginAttempt()
+        {
+            lock (_lastLoginLock)
+            {
+                _lastLoginAttempt = DateTime.UtcNow;
+            }
         }
     }
 } 

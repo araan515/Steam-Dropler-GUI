@@ -90,6 +90,36 @@ namespace DroplerGUI.Models
         public string SharedSecret { get; set; }
 
         /// <summary>
+        /// Токен доступа для авторизации
+        /// </summary>
+        [JsonProperty("access_token")]
+        public string AccessToken { get; set; }
+
+        /// <summary>
+        /// Время последнего обновления токена
+        /// </summary>
+        [JsonProperty("token_update_time")]
+        public DateTime? LastTokenUpdateTime { get; set; }
+
+        /// <summary>
+        /// Время истечения срока действия токена
+        /// </summary>
+        [JsonProperty("token_valid_until")]
+        public DateTime? TokenValidUntil { get; set; }
+
+        /// <summary>
+        /// Количество неудачных попыток входа
+        /// </summary>
+        [JsonProperty("failed_login_attempts")]
+        public int FailedLoginAttempts { get; set; }
+
+        /// <summary>
+        /// Время последней неудачной попытки входа
+        /// </summary>
+        [JsonProperty("last_failed_login")]
+        public DateTime? LastFailedLogin { get; set; }
+
+        /// <summary>
         /// Настройки времени
         /// </summary>
         public TimeConfig TimeConfig { get; set; }
@@ -166,6 +196,13 @@ namespace DroplerGUI.Models
             Name = Path.GetFileNameWithoutExtension(path);
             Alias = obj.Alias ?? Name;
             Ltime = obj.Ltime != 0 ? obj.Ltime : 1;
+
+            // Инициализация полей для токена
+            AccessToken = obj.AccessToken;
+            LastTokenUpdateTime = obj.LastTokenUpdateTime;
+            TokenValidUntil = obj.TokenValidUntil;
+            FailedLoginAttempts = obj.FailedLoginAttempts;
+            LastFailedLogin = obj.LastFailedLogin;
 
             int naml = Alias.Length;
             if (naml > Util.unmax) {

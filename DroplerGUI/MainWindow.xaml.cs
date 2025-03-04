@@ -9,6 +9,9 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using DroplerGUI.ViewModels;
 using DroplerGUI.Core;
+using System.Linq;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace DroplerGUI
 {
@@ -18,6 +21,8 @@ namespace DroplerGUI
         private readonly DispatcherTimer _updateTimer;
         private readonly TaskManager _taskManager;
         private readonly ObservableCollection<TaskViewModel> _tasks;
+        private readonly ScheduleManagerService _scheduleManager;
+        private readonly ILogger<ScheduleManagerService> _logger;
         private Dictionary<int, StatisticsWindow> _statisticsWindows = new Dictionary<int, StatisticsWindow>();
 
         public MainWindow()
@@ -26,6 +31,16 @@ namespace DroplerGUI
             
             try
             {
+                // Настраиваем логирование
+                var serviceCollection = new ServiceCollection();
+                serviceCollection.AddLogging(builder =>
+                {
+                    builder.AddConsole();
+                    builder.AddDebug();
+                });
+                var serviceProvider = serviceCollection.BuildServiceProvider();
+                _logger = serviceProvider.GetRequiredService<ILogger<ScheduleManagerService>>();
+
                 // Устанавливаем информацию о версии
                 VersionInfoTextBlock.Text = Constants.GetVersionInfo();
 
@@ -42,6 +57,16 @@ namespace DroplerGUI
                 {
                     var taskViewModel = new TaskViewModel(task, OnTaskDelete);
                     _tasks.Add(taskViewModel);
+                }
+
+                // Инициализируем менеджер расписаний
+                var taskViewModels = _tasks.ToDictionary(t => t.TaskNumber, t => t);
+                _scheduleManager = new ScheduleManagerService(taskViewModels, _logger);
+
+                // Устанавливаем менеджер расписаний в App
+                if (Application.Current is App app)
+                {
+                    app.ScheduleManager = _scheduleManager;
                 }
 
                 // Инициализируем и запускаем таймер обновления
@@ -73,7 +98,7 @@ namespace DroplerGUI
             }
         }
 
-        private async void MainWindow_Closing(object sender, CancelEventArgs e)
+        private void MainWindow_Closing(object sender, CancelEventArgs e)
         {
             if (isClosing) return;
             
@@ -84,6 +109,9 @@ namespace DroplerGUI
             {
                 // Останавливаем таймер обновления
                 _updateTimer.Stop();
+
+                // Останавливаем менеджер расписаний
+                _scheduleManager.Dispose();
 
                 // Останавливаем все потоки
                 _taskManager.StopAll();
@@ -182,6 +210,17 @@ namespace DroplerGUI
             var settingsWindow = new SettingsWindow(taskNumber);
             settingsWindow.Owner = this;
             settingsWindow.ShowDialog();
+        }
+
+        private void ScheduleButton_Click(object sender, RoutedEventArgs e)
+        {
+            var button = (Button)sender;
+            var taskViewModel = (TaskViewModel)button.DataContext;
+            var taskNumber = taskViewModel.TaskNumber;
+
+            var scheduleWindow = new ScheduleWindow(taskNumber);
+            scheduleWindow.Owner = this;
+            scheduleWindow.ShowDialog();
         }
 
         private void LogMessage(string message)

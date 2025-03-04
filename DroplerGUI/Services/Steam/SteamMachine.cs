@@ -10,6 +10,7 @@ using System.Timers;
 using Newtonsoft.Json;
 using SteamKit2;
 using SteamKit2.Internal;
+using SteamKit2.Authentication;
 using DroplerGUI.Models;
 using DroplerGUI.Core;
 using DroplerGUI.Services.Steam;
@@ -89,6 +90,123 @@ namespace DroplerGUI.Services.Steam
             }
         }
 
+        private async Task<EResult> AuthenticateWithToken()
+        {
+            try
+            {
+                // Проверяем, не заблокирован ли аккаунт из-за множества попыток
+                if (_account.LastFailedLogin.HasValue && _account.FailedLoginAttempts > 0)
+                {
+                    var timeSinceLastFail = DateTime.UtcNow - _account.LastFailedLogin.Value;
+                    var requiredDelay = TimeSpan.FromMinutes(Math.Min(30, Math.Pow(2, _account.FailedLoginAttempts))); // Экспоненциальная задержка
+
+                    if (timeSinceLastFail < requiredDelay)
+                    {
+                        var waitTime = requiredDelay - timeSinceLastFail;
+                        Log($"[DEBUG] Аккаунт {_account.Alias} ожидает {waitTime.TotalMinutes:F1} минут после предыдущих неудачных попыток", false);
+                        await Task.Delay(waitTime);
+                    }
+                }
+
+                // Если есть сохраненный токен, проверяем его валидность
+                if (!string.IsNullOrEmpty(_account.AccessToken))
+                {
+                    var tokenIsValid = !_account.TokenValidUntil.HasValue || _account.TokenValidUntil.Value > DateTime.UtcNow.AddMinutes(30);
+                    
+                    if (tokenIsValid)
+                    {
+                        Log($"[DEBUG] Найден действующий токен для {_account.Alias} (действителен до {_account.TokenValidUntil?.ToString() ?? "не задано"})", false);
+                        _steamUser.LogOn(new SteamUser.LogOnDetails
+                        {
+                            Username = _account.Alias,
+                            AccessToken = _account.AccessToken,
+                            ShouldRememberPassword = true
+                        });
+                        return EResult.OK;
+                    }
+                    else
+                    {
+                        Log($"[DEBUG] Токен для {_account.Alias} истек или истекает скоро, получаю новый", false);
+                        _account.AccessToken = null;
+                        _account.TokenValidUntil = null;
+                        _account.Save();
+                    }
+                }
+
+                // Проверяем глобальное ограничение на количество попыток входа
+                var lastLoginAttempt = TaskWorker.GetLastLoginAttempt();
+                if (lastLoginAttempt.HasValue)
+                {
+                    var timeSinceLastAttempt = DateTime.UtcNow - lastLoginAttempt.Value;
+                    var minimumDelay = TimeSpan.FromSeconds(60); // Увеличиваем минимальную задержку до 60 секунд
+
+                    if (timeSinceLastAttempt < minimumDelay)
+                    {
+                        Log($"[DEBUG] Слишком частые попытки входа, ожидаю {(minimumDelay - timeSinceLastAttempt).TotalSeconds:F1} секунд...", false);
+                        await Task.Delay(minimumDelay - timeSinceLastAttempt);
+                    }
+                }
+
+                Log($"[DEBUG] Начинаю процесс получения нового токена для {_account.Alias}", false);
+                
+                // Обновляем время последней попытки входа
+                TaskWorker.UpdateLastLoginAttempt();
+
+                var authenticator = AuthenticatorFactory.CreateAuthenticator(_account.SharedSecret);
+                
+                var authSession = await _steamClient.Authentication.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
+                {
+                    Username = _account.Alias,
+                    Password = _account.Password,
+                    ClientOSType = EOSType.Windows10,
+                    DeviceFriendlyName = _account.Alias + "_pc",
+                    PlatformType = EAuthTokenPlatformType.k_EAuthTokenPlatformType_SteamClient,
+                    IsPersistentSession = true,
+                    WebsiteID = "Client",
+                    Authenticator = authenticator
+                });
+
+                Log("[DEBUG] Ожидание подтверждения аутентификации...", false);
+                var pollResponse = await authSession.PollingWaitForResultAsync();
+                
+                // Сохраняем полученный токен и устанавливаем срок его действия
+                _account.AccessToken = pollResponse.RefreshToken;
+                _account.LastTokenUpdateTime = DateTime.UtcNow;
+                _account.TokenValidUntil = DateTime.UtcNow.AddDays(7); // Устанавливаем срок действия токена на 7 дней
+                _account.FailedLoginAttempts = 0; // Сбрасываем счетчик неудачных попыток
+                _account.LastFailedLogin = null;
+                _account.Save();
+                
+                Log("[DEBUG] Токен успешно получен и сохранен", false);
+
+                // Сразу используем полученный токен
+                _steamUser.LogOn(new SteamUser.LogOnDetails
+                {
+                    Username = _account.Alias,
+                    AccessToken = _account.AccessToken,
+                    ShouldRememberPassword = true
+                });
+
+                return EResult.OK;
+            }
+            catch (SteamKit2.Authentication.AuthenticationException ex)
+            {
+                _account.FailedLoginAttempts++;
+                _account.LastFailedLogin = DateTime.UtcNow;
+                _account.Save();
+                
+                var waitTime = TimeSpan.FromMinutes(Math.Min(30, Math.Pow(2, _account.FailedLoginAttempts)));
+                Log($"Steam ограничил попытки входа. Следующая попытка через {waitTime.TotalMinutes:F1} минут...");
+                await Task.Delay(waitTime);
+                return EResult.RateLimitExceeded;
+            }
+            catch (Exception ex)
+            {
+                Log($"[DEBUG] Ошибка при аутентификации: {ex.Message}");
+                return EResult.Fail;
+            }
+        }
+
         public async Task<EResult> EasyIdling()
         {
             try
@@ -120,26 +238,12 @@ namespace DroplerGUI.Services.Steam
                     return EResult.NoConnection;
                 }
 
-                // Выполняем вход
-                Log($"Начинаю процесс входа для аккаунта {_account.Name}", false);
-                Log($"SharedSecret: {(!string.IsNullOrEmpty(_account.SharedSecret))}", false);
-                var authenticator = AuthenticatorFactory.CreateAuthenticator(_account.SharedSecret);
-                var twoFactorCode = await authenticator.GetDeviceCodeAsync(false);
-                Log($"Получен код аутентификации: {(string.IsNullOrEmpty(twoFactorCode) ? "нет" : "да")}", false);
-                
-                var logonDetails = new SteamUser.LogOnDetails
+                // Выполняем аутентификацию с использованием нового метода
+                var authResult = await AuthenticateWithToken();
+                if (authResult != EResult.OK)
                 {
-                    Username = _account.Alias,
-                    Password = _account.Password,
-                    TwoFactorCode = twoFactorCode,
-                    LoginID = (uint)new Random().Next(1, int.MaxValue),
-                    ShouldRememberPassword = true,
-                    ClientLanguage = "english",
-                    CellID = 1
-                };
-
-                Log($"Попытка входа для {_account.Alias}...", false);
-                _steamUser.LogOn(logonDetails);
+                    return authResult;
+                }
 
                 // Ждем входа
                 var loginTimeout = TimeSpan.FromSeconds(30);
@@ -413,14 +517,27 @@ namespace DroplerGUI.Services.Steam
                         "Неверный код двухфакторной аутентификации",
                     EResult.ServiceUnavailable => 
                         "Сервис Steam недоступен, попробуйте позже",
+                    EResult.RateLimitExceeded =>
+                        "Превышен лимит попыток входа, ожидание...",
+                    EResult.InvalidLoginAuthCode =>
+                        "Неверный код аутентификации",
                     _ => $"Не удалось войти: {callback.Result}"
                 };
+
+                if (callback.Result == EResult.InvalidLoginAuthCode || 
+                    callback.Result == EResult.RateLimitExceeded)
+                {
+                    _account.FailedLoginAttempts++;
+                    _account.LastFailedLogin = DateTime.UtcNow;
+                    _account.Save();
+                }
                 
                 Log(errorMessage);
                 return;
             }
 
             _isLoggedIn = true;
+            Log($"[DEBUG] Успешный вход для {_account.Alias}! Метод входа: {(string.IsNullOrEmpty(_account.AccessToken) ? "полная аутентификация" : "через токен")}", false);
             Log("Успешный вход!");
 
             // Устанавливаем статус

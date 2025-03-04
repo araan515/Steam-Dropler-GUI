@@ -38,6 +38,7 @@ namespace DroplerGUI.Models
         public string ShowStatus { get; set; }
         public TimeConfig TimeConfig { get; set; }
         public List<(uint, string)> DropConfig { get; set; }
+        public ScheduleConfig Schedule { get; set; }
 
         [JsonIgnore]
         public bool SavCfg { get; set; }
@@ -107,7 +108,8 @@ namespace DroplerGUI.Models
                 DropConfig = new List<(uint, string)>
                 {
                     (2923300, "99999")
-                }
+                },
+                Schedule = new ScheduleConfig()
             };
         }
 

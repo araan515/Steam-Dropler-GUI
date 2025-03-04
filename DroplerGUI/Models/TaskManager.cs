@@ -3,82 +3,103 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using DroplerGUI.Core;
+using DroplerGUI.Services;
 
 namespace DroplerGUI.Models
 {
     public class TaskManager
     {
-        private readonly Dictionary<int, TaskInstance> _tasks = new();
-        private readonly string _appDataPath;
-        
+        private readonly string _basePath;
+        private readonly Dictionary<int, TaskInstance> _tasks;
+        private readonly object _lock = new object();
+
         public IReadOnlyDictionary<int, TaskInstance> Tasks => _tasks;
-        
-        public TaskManager(string appDataPath)
+
+        public TaskManager(string basePath)
         {
-            _appDataPath = appDataPath;
-            LoadTasks();
+            _basePath = basePath;
+            _tasks = new Dictionary<int, TaskInstance>();
+            LoadExistingTasks();
         }
-        
-        private void LoadTasks()
+
+        private void LoadExistingTasks()
         {
-            var taskDirs = Directory.GetDirectories(_appDataPath, "task_*");
-            foreach (var dir in taskDirs)
-            {
-                try
-                {
-                    var dirName = Path.GetFileName(dir);
-                    if (int.TryParse(dirName.Replace("task_", ""), out int taskNumber))
-                    {
-                        var task = new TaskInstance(taskNumber, _appDataPath);
-                        _tasks[taskNumber] = task;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // _logger.Log($"Ошибка при загрузке таска {Path.GetFileName(dir)}: {ex.Message}");
-                }
-            }
-        }
-        
-        public TaskInstance CreateTask()
-        {
-            var nextTaskNumber = 1;
-            while (_tasks.ContainsKey(nextTaskNumber))
-            {
-                nextTaskNumber++;
-            }
-            
-            var task = new TaskInstance(nextTaskNumber, _appDataPath);
-            _tasks[nextTaskNumber] = task;
-            return task;
-        }
-        
-        public void DeleteTask(int taskNumber)
-        {
-            if (!_tasks.ContainsKey(taskNumber))
-            {
-                throw new ArgumentException($"Таск {taskNumber} не существует");
-            }
-            
-            var task = _tasks[taskNumber];
-            task.Stop();
-            _tasks.Remove(taskNumber);
-            
             try
             {
-                var taskPath = Path.Combine(_appDataPath, $"task_{taskNumber}");
-                if (Directory.Exists(taskPath))
+                var taskDirectories = Directory.GetDirectories(_basePath)
+                    .Where(d => Path.GetFileName(d).StartsWith("task_", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var dir in taskDirectories)
                 {
-                    Directory.Delete(taskPath, true);
+                    try
+                    {
+                        var taskNumber = int.Parse(Path.GetFileName(dir).Split('_')[1]);
+                        var task = new TaskInstance(taskNumber, _basePath);
+                        _tasks[taskNumber] = task;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Ошибка при загрузке задачи из директории {dir}: {ex.Message}");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                // _logger.Log($"Ошибка при удалении директории таска {taskNumber}: {ex.Message}");
+                Console.WriteLine($"Ошибка при поиске существующих задач: {ex.Message}");
                 throw;
             }
         }
-        
+
+        public TaskInstance CreateTask()
+        {
+            lock (_lock)
+            {
+                try
+                {
+                    var taskNumber = GetNextTaskNumber();
+                    var task = new TaskInstance(taskNumber, _basePath);
+                    _tasks[taskNumber] = task;
+                    return task;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при создании новой задачи: {ex.Message}");
+                    throw;
+                }
+            }
+        }
+
+        private int GetNextTaskNumber()
+        {
+            return _tasks.Count > 0 ? _tasks.Keys.Max() + 1 : 1;
+        }
+
+        public void DeleteTask(int taskNumber)
+        {
+            lock (_lock)
+            {
+                if (_tasks.TryGetValue(taskNumber, out var task))
+                {
+                    try
+                    {
+                        task.Stop();
+                        var taskPath = Path.Combine(_basePath, $"task_{taskNumber}");
+                        if (Directory.Exists(taskPath))
+                        {
+                            Directory.Delete(taskPath, true);
+                        }
+                        _tasks.Remove(taskNumber);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Ошибка при удалении задачи {taskNumber}: {ex.Message}");
+                        throw;
+                    }
+                }
+            }
+        }
+
         public TaskInstance GetTask(int taskNumber)
         {
             if (_tasks.TryGetValue(taskNumber, out var task))
@@ -87,32 +108,20 @@ namespace DroplerGUI.Models
             }
             throw new InvalidOperationException($"Таск с номером {taskNumber} не найден");
         }
-        
+
         public void StartAll()
         {
             foreach (var task in _tasks.Values)
             {
-                if (!task.IsRunning)
-                {
-                    task.Start();
-                    // Ждем пока первый аккаунт начнет подключаться
-                    System.Threading.Thread.Sleep(5000);
-                }
+                task.Start();
             }
         }
-        
+
         public void StopAll()
         {
             foreach (var task in _tasks.Values)
             {
-                try
-                {
-                    task.Stop();
-                }
-                catch
-                {
-                    // Игнорируем ошибки при остановке отдельных тасков
-                }
+                task.Stop();
             }
         }
     }

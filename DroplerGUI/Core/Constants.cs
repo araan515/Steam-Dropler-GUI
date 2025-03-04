@@ -5,7 +5,7 @@ namespace DroplerGUI.Core
 {
     public static class Constants
     {
-        public const string DROPLER_VERSION = "1.2";
+        public const string DROPLER_VERSION = "1.3";
         public const string GUI_VERSION = "3.0.0-beta4";
         public const string STEAMKIT_VERSION = "3.0.0-beta4";
         public static readonly string AppDataPath = AppDomain.CurrentDomain.BaseDirectory;

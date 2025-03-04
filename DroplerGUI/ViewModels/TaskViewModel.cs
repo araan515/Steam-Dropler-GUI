@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Collections.ObjectModel;
 using DroplerGUI.Models;
 using DroplerGUI.Core;
+using System.Threading.Tasks;
 
 namespace DroplerGUI.ViewModels
 {
@@ -20,9 +21,24 @@ namespace DroplerGUI.ViewModels
         public TaskInstance TaskInstance => _taskInstance;
         public int TaskNumber => _taskInstance.TaskNumber;
         public ObservableCollection<LogEntry> Logs => _logs;
+        public ScheduleConfig Config => ScheduleConfig.Load(TaskNumber);
         
-        private string _status;
-        public string Status
+        private bool _showDelete;
+        public bool ShowDelete
+        {
+            get => _showDelete;
+            private set
+            {
+                if (_showDelete != value)
+                {
+                    _showDelete = value;
+                    OnPropertyChanged(nameof(ShowDelete));
+                }
+            }
+        }
+        
+        private Models.TaskStatus _status;
+        public Models.TaskStatus Status
         {
             get => _status;
             private set
@@ -30,7 +46,7 @@ namespace DroplerGUI.ViewModels
                 if (_status != value)
                 {
                     _status = value;
-                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(Status));
                     OnPropertyChanged(nameof(StatusColor));
                     OnPropertyChanged(nameof(CanStart));
                     OnPropertyChanged(nameof(CanStop));
@@ -46,10 +62,10 @@ namespace DroplerGUI.ViewModels
             {
                 return Status switch
                 {
-                    "Остановлен" => Brushes.Gray,
-                    "Запускается" => Brushes.Orange,
-                    "Работает" => Brushes.Green,
-                    "Останавливается" => Brushes.Orange,
+                    Models.TaskStatus.Stopped => Brushes.Gray,
+                    Models.TaskStatus.Initializing => Brushes.Orange,
+                    Models.TaskStatus.Running => Brushes.Green,
+                    Models.TaskStatus.Stopping => Brushes.Orange,
                     _ => Brushes.Red
                 };
             }
@@ -125,10 +141,9 @@ namespace DroplerGUI.ViewModels
             }
         }
         
-        public bool CanStart => _taskInstance.Status == TaskStatus.Stopped || _taskInstance.Status == TaskStatus.Error;
-        public bool CanStop => _taskInstance.Status == TaskStatus.Running || _taskInstance.Status == TaskStatus.Initializing;
-        public bool CanDelete => _taskInstance.Status == TaskStatus.Stopped && TaskNumber != 1;
-        public Visibility ShowDelete => TaskNumber == 1 ? Visibility.Collapsed : Visibility.Visible;
+        public bool CanStart => _taskInstance.Status == Models.TaskStatus.Stopped || _taskInstance.Status == Models.TaskStatus.Error;
+        public bool CanStop => _taskInstance.Status == Models.TaskStatus.Running || _taskInstance.Status == Models.TaskStatus.Initializing;
+        public bool CanDelete => _taskInstance.Status == Models.TaskStatus.Stopped && TaskNumber != 1;
         
         public ICommand StartCommand { get; }
         public ICommand StopCommand { get; }
@@ -216,7 +231,7 @@ namespace DroplerGUI.ViewModels
         
         public bool IsSettingsEnabled
         {
-            get => Status == "Остановлен";
+            get => Status == Models.TaskStatus.Stopped;
         }
         
         public TaskViewModel(TaskInstance taskInstance, Action<TaskViewModel> onDelete)
@@ -225,12 +240,12 @@ namespace DroplerGUI.ViewModels
             _onDelete = onDelete;
             _logs = new ObservableCollection<LogEntry>();
             
-            StartCommand = new RelayCommand(Start, () => CanStart);
-            StopCommand = new RelayCommand(Stop, () => CanStop);
+            StartCommand = new AsyncRelayCommand(StartAsync, () => CanStart);
+            StopCommand = new AsyncRelayCommand(StopAsync, () => CanStop);
             DeleteCommand = new RelayCommand(Delete, () => CanDelete);
             
             _buttonText = "Запустить";
-            _status = "Остановлен";
+            _status = Models.TaskStatus.Stopped;
             _isRunning = false;
             
             // Подписываемся на логи
@@ -240,7 +255,7 @@ namespace DroplerGUI.ViewModels
             UpdateStatistics();
         }
         
-        public void Start()
+        public async Task StartAsync()
         {
             try
             {
@@ -249,22 +264,36 @@ namespace DroplerGUI.ViewModels
             }
             catch (Exception ex)
             {
-                Status = "Ошибка";
+                Status = Models.TaskStatus.Error;
                 MessageBox.Show($"Ошибка при запуске потока: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         
-        private void Stop()
+        public async Task StopAsync()
         {
             try
             {
-                _taskInstance.Stop();
+                // Устанавливаем промежуточный статус
+                Status = Models.TaskStatus.Stopping;
+                
+                // Ждем завершения остановки
+                await _taskInstance.StopAsync();
+                
+                // Обновляем статус только после успешной остановки
+                Status = Models.TaskStatus.Stopped;
+                ShowDelete = true;
+                
+                // Обновляем UI
                 UpdateStatus();
                 UpdateStatistics();
+                
+                // Добавляем сообщение в лог
+                AddLogMessage("Задача успешно остановлена");
             }
             catch (Exception ex)
             {
-                Status = "Ошибка";
+                Status = Models.TaskStatus.Error;
+                AddLogMessage($"Ошибка при остановке задачи: {ex.Message}");
                 MessageBox.Show($"Ошибка при остановке потока: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
@@ -283,19 +312,19 @@ namespace DroplerGUI.ViewModels
             
             Status = taskStatus switch
             {
-                TaskStatus.Stopped => "Остановлен",
-                TaskStatus.Initializing => "Запускается",
-                TaskStatus.Running => "Работает",
-                TaskStatus.Stopping => "Останавливается",
-                TaskStatus.Error => "Ошибка",
-                _ => "Неизвестно"
+                Models.TaskStatus.Stopped => Models.TaskStatus.Stopped,
+                Models.TaskStatus.Initializing => Models.TaskStatus.Initializing,
+                Models.TaskStatus.Running => Models.TaskStatus.Running,
+                Models.TaskStatus.Stopping => Models.TaskStatus.Stopping,
+                Models.TaskStatus.Error => Models.TaskStatus.Error,
+                _ => Models.TaskStatus.Unknown
             };
             
             ButtonText = _isRunning ? "Остановить" : "Запустить";
             
             // Обновляем состояние команд
-            (StartCommand as RelayCommand)?.RaiseCanExecuteChanged();
-            (StopCommand as RelayCommand)?.RaiseCanExecuteChanged();
+            (StartCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+            (StopCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
             (DeleteCommand as RelayCommand)?.RaiseCanExecuteChanged();
         }
         
@@ -330,6 +359,51 @@ namespace DroplerGUI.ViewModels
         protected virtual void OnPropertyChanged([CallerMemberName] string propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+
+    public class AsyncRelayCommand : ICommand
+    {
+        private readonly Func<Task> _execute;
+        private readonly Func<bool> _canExecute;
+        private bool _isExecuting;
+
+        public AsyncRelayCommand(Func<Task> execute, Func<bool> canExecute = null)
+        {
+            _execute = execute ?? throw new ArgumentNullException(nameof(execute));
+            _canExecute = canExecute;
+        }
+
+        public event EventHandler CanExecuteChanged
+        {
+            add { CommandManager.RequerySuggested += value; }
+            remove { CommandManager.RequerySuggested -= value; }
+        }
+
+        public bool CanExecute(object parameter)
+        {
+            return !_isExecuting && (_canExecute?.Invoke() ?? true);
+        }
+
+        public async void Execute(object parameter)
+        {
+            if (CanExecute(parameter))
+            {
+                try
+                {
+                    _isExecuting = true;
+                    await _execute();
+                }
+                finally
+                {
+                    _isExecuting = false;
+                }
+            }
+        }
+
+        public void RaiseCanExecuteChanged()
+        {
+            CommandManager.InvalidateRequerySuggested();
         }
     }
 } 

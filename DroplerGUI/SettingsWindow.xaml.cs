@@ -25,7 +25,7 @@ namespace DroplerGUI
     public partial class SettingsWindow : Window
     {
         private readonly int _taskNumber;
-        private MainConfig _config;
+        private MainConfig Config { get; set; }
         private MainConfig tempConfig;
         private ObservableCollection<DropConfigItem> dropConfigs;
 
@@ -47,8 +47,9 @@ namespace DroplerGUI
         {
             try
             {
-                _config = MainConfig.GetConfig(_taskNumber);
-                tempConfig = _config.Clone();
+                Config = MainConfig.GetConfig(_taskNumber);
+                tempConfig = Config.Clone();
+                DataContext = this;
                 LoadSettings();
             }
             catch (Exception ex)
@@ -168,6 +169,103 @@ namespace DroplerGUI
             
             DialogResult = false;
             Close();
+        }
+    }
+
+    public class TimeRangeDialog : Window
+    {
+        public TimeSpan StartTime { get; private set; }
+        public TimeSpan EndTime { get; private set; }
+
+        public TimeRangeDialog()
+        {
+            Title = "Добавить интервал";
+            Width = 300;
+            Height = 200;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+
+            var grid = new Grid();
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            // Время начала
+            var startLabel = new Label { Content = "Время запуска:" };
+            var startPicker = new System.Windows.Controls.DatePicker();
+            var startTime = new System.Windows.Controls.TextBox { Text = "00:00" };
+            
+            Grid.SetRow(startLabel, 0);
+            grid.Children.Add(startLabel);
+
+            var startPanel = new StackPanel { Orientation = Orientation.Horizontal };
+            startPanel.Children.Add(startPicker);
+            startPanel.Children.Add(startTime);
+            Grid.SetRow(startPanel, 1);
+            grid.Children.Add(startPanel);
+
+            // Время окончания
+            var endLabel = new Label { Content = "Время остановки:" };
+            var endPicker = new System.Windows.Controls.DatePicker();
+            var endTime = new System.Windows.Controls.TextBox { Text = "00:00" };
+            
+            Grid.SetRow(endLabel, 2);
+            grid.Children.Add(endLabel);
+
+            var endPanel = new StackPanel { Orientation = Orientation.Horizontal };
+            endPanel.Children.Add(endPicker);
+            endPanel.Children.Add(endTime);
+            Grid.SetRow(endPanel, 3);
+            grid.Children.Add(endPanel);
+
+            // Кнопки
+            var buttonPanel = new StackPanel 
+            { 
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            Grid.SetRow(buttonPanel, 4);
+
+            var okButton = new Button 
+            { 
+                Content = "OK",
+                Width = 75,
+                Margin = new Thickness(0, 0, 5, 0)
+            };
+            okButton.Click += (s, e) =>
+            {
+                if (TimeSpan.TryParse(startTime.Text, out var start) &&
+                    TimeSpan.TryParse(endTime.Text, out var end))
+                {
+                    StartTime = start;
+                    EndTime = end;
+                    DialogResult = true;
+                    Close();
+                }
+                else
+                {
+                    MessageBox.Show("Неверный формат времени. Используйте формат ЧЧ:ММ", 
+                        "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            };
+
+            var cancelButton = new Button 
+            { 
+                Content = "Отмена",
+                Width = 75
+            };
+            cancelButton.Click += (s, e) =>
+            {
+                DialogResult = false;
+                Close();
+            };
+
+            buttonPanel.Children.Add(okButton);
+            buttonPanel.Children.Add(cancelButton);
+            grid.Children.Add(buttonPanel);
+
+            Content = grid;
+            Padding = new Thickness(10);
         }
     }
 } 

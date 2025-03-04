@@ -6,6 +6,7 @@ using Newtonsoft.Json;
 using DroplerGUI.Core;
 using DroplerGUI.Services;
 using System.ComponentModel;
+using System.Threading.Tasks;
 
 namespace DroplerGUI.Models
 {
@@ -247,24 +248,27 @@ namespace DroplerGUI.Models
             }
         }
         
-        public void Stop()
+        public async Task StopAsync()
         {
-            if (!IsRunning) return;
-            
+            if (Worker == null) return;
+
             try
             {
-                Status = TaskStatus.Stopping;
-                _worker.Stop();
+                await Worker.StopAsync();
                 IsRunning = false;
-                LastStartTime = null;
                 Status = TaskStatus.Stopped;
             }
             catch (Exception ex)
             {
                 Status = TaskStatus.Error;
-                _worker.Log($"Ошибка при остановке потока: {ex.Message}");
-                throw;
+                throw new Exception($"Ошибка при остановке задачи {TaskNumber}: {ex.Message}", ex);
             }
+        }
+
+        // Синхронный метод-обертка для обратной совместимости
+        public void Stop()
+        {
+            StopAsync().GetAwaiter().GetResult();
         }
 
         public (int Total, int Enabled, int Farming) GetAccountsInfo()
@@ -303,6 +307,7 @@ namespace DroplerGUI.Models
         Initializing,
         Running,
         Stopping,
-        Error
+        Error,
+        Unknown
     }
 } 
